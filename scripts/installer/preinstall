@@ -1,0 +1,8 @@
+#!/bin/zsh
+
+set -euo pipefail
+
+# A running copy can keep the old executable alive after replacement.
+/usr/bin/killall AIMeter 2>/dev/null || true
+
+exit 0

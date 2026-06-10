@@ -1,0 +1,9 @@
+#!/bin/zsh
+
+set -euo pipefail
+
+APP_PATH="/Applications/AI Meter.app"
+
+/usr/bin/xattr -cr "$APP_PATH" 2>/dev/null || true
+
+exit 0
