@@ -21,17 +21,7 @@ extension ProviderID {
     }
 
     var badgeCGImage: CGImage? {
-        guard
-            let url = Bundle.main.url(forResource: assetName, withExtension: "png")
-                ?? Bundle.module.url(
-                    forResource: assetName,
-                    withExtension: "png"
-                ),
-            let source = CGImageSourceCreateWithURL(url as CFURL, nil)
-        else {
-            return nil
-        }
-        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+        BadgeImageCache.images[self]
     }
 
     var accentColor: Color {
@@ -43,4 +33,25 @@ extension ProviderID {
         case .copilot: Color(red: 0.54, green: 0.78, blue: 0.36)
         }
     }
+}
+
+private enum BadgeImageCache {
+    static let images: [ProviderID: CGImage] = Dictionary(
+        uniqueKeysWithValues: ProviderID.allCases.compactMap { provider in
+            guard
+                let url = Bundle.main.url(
+                    forResource: provider.assetName,
+                    withExtension: "png"
+                ) ?? Bundle.module.url(
+                    forResource: provider.assetName,
+                    withExtension: "png"
+                ),
+                let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+            else {
+                return nil
+            }
+            return (provider, image)
+        }
+    )
 }

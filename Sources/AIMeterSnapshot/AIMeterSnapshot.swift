@@ -12,7 +12,7 @@ struct AIMeterSnapshot {
         let renderSettings = CommandLine.arguments.contains("--settings")
         let store = UsageStore()
         if !renderSettings {
-            await store.refresh()
+            await store.refresh(forceClaudeQuota: true)
         }
 
         _ = NSApplication.shared

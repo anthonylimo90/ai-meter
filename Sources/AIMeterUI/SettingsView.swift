@@ -57,7 +57,6 @@ public struct SettingsView: View {
                             "Refresh every",
                             selection: $store.refreshIntervalSeconds
                         ) {
-                            Text("30 seconds").tag(30)
                             Text("1 minute").tag(60)
                             Text("5 minutes").tag(300)
                             Text("15 minutes").tag(900)
@@ -76,16 +75,10 @@ public struct SettingsView: View {
 
                     LabeledContent("Current state") {
                         Label(
-                            store.isRefreshing ? "Refreshing" : "Monitoring",
-                            systemImage: store.isRefreshing
-                                ? "arrow.triangle.2.circlepath"
-                                : "checkmark.circle.fill"
+                            monitoringState.title,
+                            systemImage: monitoringState.symbolName
                         )
-                        .foregroundStyle(
-                            store.isRefreshing
-                                ? Color.secondary
-                                : Color.green
-                        )
+                        .foregroundStyle(monitoringState.color)
                     }
                 }
                 .padding(4)
@@ -93,7 +86,7 @@ public struct SettingsView: View {
 
             settingsHeader(
                 title: "How It Updates",
-                detail: "Codex is read directly from changing session logs. Claude is queried through Claude Code's own /usage view, so 30-60 seconds is the practical near-real-time range."
+                detail: "Local logs follow the selected refresh interval. Claude quota checks run at most every 15 minutes unless you choose Refresh Now. Low Power Mode also limits background refreshes to every 15 minutes."
             )
 
             Label(
@@ -108,11 +101,10 @@ public struct SettingsView: View {
             HStack {
                 Spacer()
                 Button {
-                    Task { await store.refresh() }
+                    Task { await store.refresh(forceClaudeQuota: true) }
                 } label: {
                     Label("Refresh Now", systemImage: "arrow.clockwise")
                 }
-                .disabled(store.isRefreshing)
             }
         }
     }
@@ -145,11 +137,10 @@ public struct SettingsView: View {
                 Spacer()
 
                 Button {
-                    Task { await store.refresh() }
+                    Task { await store.refresh(forceClaudeQuota: true) }
                 } label: {
                     Label("Refresh Now", systemImage: "arrow.clockwise")
                 }
-                .disabled(store.isRefreshing)
             }
         }
     }
@@ -212,6 +203,34 @@ public struct SettingsView: View {
             date: .abbreviated,
             time: .standard
         )
+    }
+
+    private var monitoringState: (
+        title: String,
+        symbolName: String,
+        color: Color
+    ) {
+        if store.isRefreshing {
+            return (
+                "Refreshing",
+                "arrow.triangle.2.circlepath",
+                .secondary
+            )
+        }
+        if store.readings.contains(where: { $0.availability == .failed }) {
+            return (
+                "Needs attention",
+                "exclamationmark.triangle.fill",
+                .orange
+            )
+        }
+        if !store.autoRefreshEnabled {
+            return ("Automatic refresh paused", "pause.circle.fill", .secondary)
+        }
+        if !store.hasLoaded {
+            return ("Waiting for first update", "clock.fill", .secondary)
+        }
+        return ("Monitoring", "checkmark.circle.fill", .green)
     }
 }
 

@@ -172,19 +172,19 @@ public struct ProviderConfiguration: Codable, Identifiable, Equatable, Sendable 
     }
 }
 
-public enum UsageAvailability: String, Sendable {
+public enum UsageAvailability: String, Codable, Sendable {
     case measured
     case unavailable
     case failed
 }
 
-public enum PlanUsageSource: String, Sendable {
+public enum PlanUsageSource: String, Codable, Sendable {
     case providerReported
     case configuredBudget
     case unavailable
 }
 
-public struct PlanUsageWindow: Equatable, Sendable {
+public struct PlanUsageWindow: Codable, Equatable, Sendable {
     public let label: String
     public let usedPercent: Double
     public let windowMinutes: Int
@@ -211,7 +211,7 @@ public struct PlanUsageWindow: Equatable, Sendable {
     }
 }
 
-public struct PlanUsageSnapshot: Equatable, Sendable {
+public struct PlanUsageSnapshot: Codable, Equatable, Sendable {
     public let source: PlanUsageSource
     public let planName: String?
     public let windows: [PlanUsageWindow]
@@ -230,7 +230,7 @@ public struct PlanUsageSnapshot: Equatable, Sendable {
     }
 }
 
-public struct ProviderUsage: Identifiable, Sendable {
+public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
     public let id: ProviderID
     public let tier: String
     public let usedTokens: Int
@@ -310,18 +310,21 @@ public struct ScanResult: Sendable {
     public let availability: UsageAvailability
     public let detail: String
     public let planUsage: PlanUsageSnapshot?
+    public let hasWarnings: Bool
 
     public init(
         provider: ProviderID,
         tokens: Int,
         availability: UsageAvailability,
         detail: String,
-        planUsage: PlanUsageSnapshot? = nil
+        planUsage: PlanUsageSnapshot? = nil,
+        hasWarnings: Bool = false
     ) {
         self.provider = provider
         self.tokens = tokens
         self.availability = availability
         self.detail = detail
         self.planUsage = planUsage
+        self.hasWarnings = hasWarnings
     }
 }
