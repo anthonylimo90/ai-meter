@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import AIMeterCore
 
-public struct MenuBarFallbackLabel: View {
+public struct AIMeterMenuBarLabel: View {
     let store: UsageStore
 
     public init(store: UsageStore) {
@@ -10,42 +10,60 @@ public struct MenuBarFallbackLabel: View {
     }
 
     public var body: some View {
-        Label(
-            store.menuBarTitle,
-            systemImage: "gauge.with.dots.needle.50percent"
-        )
+        Group {
+            if store.showMenuBarMeters, store.hasLiveMenuBarReadings {
+                HStack(spacing: 4) {
+                    if let reading = store.openAIMenuBarReading {
+                        ProviderMenuBarIcon(reading: reading)
+                    }
+                    if let reading = store.claudeMenuBarReading {
+                        ProviderMenuBarIcon(reading: reading)
+                    }
+                }
+            } else {
+                Label(
+                    store.menuBarTitle,
+                    systemImage: "gauge.with.dots.needle.50percent"
+                )
+            }
+        }
         .task {
             store.startAutoRefresh()
         }
     }
 }
 
-public struct ProviderMenuBarLabel: View {
-    let reading: ProviderUsage?
-    let store: UsageStore
+private struct ProviderMenuBarIcon: View {
+    let reading: ProviderUsage
 
-    public init(reading: ProviderUsage?, store: UsageStore) {
-        self.reading = reading
-        self.store = store
-    }
-
-    public var body: some View {
+    var body: some View {
         Image(nsImage: statusImage)
             .frame(width: 18, height: 18)
         .help(
-            "\(reading?.id.name ?? "AI Meter"): \(reading?.remainingPercent ?? 0)% remaining"
+            "\(reading.id.name): \(reading.remainingPercent ?? 0)% remaining"
         )
         .accessibilityLabel(
-            "\(reading?.id.name ?? "AI Meter"), \(reading?.remainingPercent ?? 0) percent remaining"
+            "\(reading.id.name), \(reading.remainingPercent ?? 0) percent remaining"
         )
-        .task {
-            store.startAutoRefresh()
-        }
     }
 
     private var statusImage: NSImage {
-        let fraction = reading?.remainingFraction ?? 0
-        let symbolName = reading?.id.symbolName ?? "gauge"
+        let fraction = reading.remainingFraction ?? 0
+        let symbolName = reading.id.symbolName
+        let bucket = Int((fraction * 20).rounded())
+        let key = "\(symbolName)|\(bucket)"
+        return MenuBarImageCache.image(for: key) {
+            makeStatusImage(
+                fraction: Double(bucket) / 20,
+                symbolName: symbolName
+            )
+        }
+    }
+
+    private func makeStatusImage(
+        fraction: Double,
+        symbolName: String
+    ) -> NSImage {
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) {
             _ in
             let symbol = NSImage(
@@ -88,5 +106,25 @@ public struct ProviderMenuBarLabel: View {
         }
         image.isTemplate = true
         return image
+    }
+}
+
+private enum MenuBarImageCache {
+    private static let lock = NSLock()
+    nonisolated(unsafe)
+    private static var images: [String: NSImage] = [:]
+
+    static func image(
+        for key: String,
+        make: () -> NSImage
+    ) -> NSImage {
+        lock.withLock {
+            if let image = images[key] {
+                return image
+            }
+            let image = make()
+            images[key] = image
+            return image
+        }
     }
 }

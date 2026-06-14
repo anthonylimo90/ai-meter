@@ -4,6 +4,7 @@ import Foundation
 enum ClaudeUsageProbe {
     static func fetch(timeout: TimeInterval = 12) -> PlanUsageSnapshot? {
         guard let executableURL = executableURL() else { return nil }
+        let deadline = Date().addingTimeInterval(timeout)
 
         var master: Int32 = -1
         var slave: Int32 = -1
@@ -27,6 +28,10 @@ enum ClaudeUsageProbe {
         process.standardInput = terminal
         process.standardOutput = terminal
         process.standardError = terminal
+        var environment = ProcessInfo.processInfo.environment
+        environment["TERM"] = "xterm-256color"
+        environment["COLORTERM"] = "truecolor"
+        process.environment = environment
 
         do {
             try process.run()
@@ -40,8 +45,13 @@ enum ClaudeUsageProbe {
         var output = Data()
         var lastReadableAt = Date()
 
-        let startupDeadline = Date().addingTimeInterval(min(timeout / 2, 6))
-        while Date() < startupDeadline, process.isRunning {
+        let startupDeadline = min(
+            deadline,
+            Date().addingTimeInterval(min(timeout / 2, 6))
+        )
+        while Date() < startupDeadline,
+              process.isRunning,
+              !Task.isCancelled {
             readAvailable(
                 from: master,
                 into: &output,
@@ -61,27 +71,43 @@ enum ClaudeUsageProbe {
             write(master, $0.baseAddress, $0.count)
         }
 
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline, process.isRunning {
+        while Date() < deadline,
+              process.isRunning,
+              !Task.isCancelled {
             readAvailable(
                 from: master,
                 into: &output,
                 lastReadableAt: &lastReadableAt
             )
 
-            if let text = String(data: output, encoding: .utf8),
-               normalizedTerminalText(text).contains("Currentsession"),
-               normalizedTerminalText(text).contains("Currentweek"),
-               Date().timeIntervalSince(lastReadableAt) > 0.5 {
-                break
+            if let text = String(data: output, encoding: .utf8) {
+                let normalized = normalizedTerminalText(text)
+                let hasSession = normalized.contains("Currentsession")
+                    || normalized.contains("Currensession")
+                let hasWeek = normalized.contains("Currentweek(allmodels)")
+                    || normalized.contains("Currentweek(allmodes)")
+                if hasSession,
+                   hasWeek,
+                   Date().timeIntervalSince(lastReadableAt) > 0.5 {
+                    break
+                }
             }
         }
 
         if process.isRunning {
             process.terminate()
+            let terminationDeadline = Date().addingTimeInterval(0.5)
+            while process.isRunning, Date() < terminationDeadline {
+                usleep(20_000)
+            }
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+            }
         }
+        process.waitUntilExit()
         close(master)
 
+        guard !Task.isCancelled else { return nil }
         guard let text = String(data: output, encoding: .utf8) else {
             return nil
         }
@@ -95,11 +121,11 @@ enum ClaudeUsageProbe {
     ) -> PlanUsageSnapshot? {
         let text = stripTerminalControlSequences(from: terminalOutput)
         let sessionMatches = captures(
-            pattern: #"Current\s*session[\s\S]{0,400}?(\d+(?:\.\d+)?)%\s*used[\s\S]{0,160}?Resets\s*([^\r\n]+)"#,
+            pattern: #"Curren(?:t)?\s*session[\s\S]{0,500}?(\d+(?:\.\d+)?)%\s*used[\s\S]{0,240}?R(?:e)?sets\s*([^\r\n]+)"#,
             in: text
         )
         let weeklyMatches = captures(
-            pattern: #"Current\s*week\s*\(all\s*models\)[\s\S]{0,400}?(\d+(?:\.\d+)?)%\s*used[\s\S]{0,160}?Resets\s*([^\r\n]+)"#,
+            pattern: #"Current\s*week\s*\(all\s*mode(?:l)?\s*s\)[\s\S]{0,500}?(\d+(?:\.\d+)?)%\s*used[\s\S]{0,240}?Resets\s*([^\r\n]+)"#,
             in: text
         )
 
@@ -210,7 +236,14 @@ enum ClaudeUsageProbe {
         var buffer = [UInt8](repeating: 0, count: 16_384)
         let count = read(descriptor, &buffer, buffer.count)
         guard count > 0 else { return }
-        output.append(contentsOf: buffer.prefix(count))
+        let chunk = Data(buffer.prefix(count))
+        output.append(chunk)
+        if chunk.range(of: Data([0x1B, 0x5B, 0x63])) != nil {
+            let response = Data("\u{1B}[?1;2c".utf8)
+            _ = response.withUnsafeBytes {
+                write(descriptor, $0.baseAddress, $0.count)
+            }
+        }
         lastReadableAt = .now
     }
 
@@ -306,11 +339,11 @@ enum ClaudeUsageProbe {
     }
 
     private static func monthNumber(for value: String) -> Int? {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
         let normalized = String(value.prefix(3)).lowercased()
-        return formatter.shortMonthSymbols
-            .map { $0.lowercased() }
+        return [
+            "jan", "feb", "mar", "apr", "may", "jun",
+            "jul", "aug", "sep", "oct", "nov", "dec"
+        ]
             .firstIndex(of: normalized)
             .map { $0 + 1 }
     }

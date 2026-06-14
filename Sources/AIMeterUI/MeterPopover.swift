@@ -11,10 +11,8 @@ public struct MeterPopover: View {
     }
 
     public var body: some View {
-        @Bindable var store = store
-
         VStack(spacing: 0) {
-            header
+            PopoverHeader(store: store)
 
             if let errorMessage = store.errorMessage {
                 errorBanner(errorMessage)
@@ -22,11 +20,11 @@ public struct MeterPopover: View {
                     .padding(.top, 12)
             }
 
-            usageList
+            ProviderUsageList(store: store)
                 .padding(.horizontal, MeterTheme.contentPadding)
                 .padding(.top, 16)
 
-            footer
+            PopoverFooter(openSettings: openSettings)
         }
         .frame(width: MeterTheme.panelWidth)
         .background {
@@ -44,11 +42,18 @@ public struct MeterPopover: View {
         )
         .preferredColorScheme(.dark)
         .task {
-            await store.refreshIfStale()
+            await store.refreshIfStale(
+                maxAge: store.autoRefreshEnabled ? 60 : 300
+            )
         }
     }
 
-    private var header: some View {
+}
+
+private struct PopoverHeader: View {
+    let store: UsageStore
+
+    var body: some View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Meter")
@@ -65,15 +70,17 @@ public struct MeterPopover: View {
                 }
                 .font(.system(size: 13, weight: .medium))
 
-                Text(updatedText)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.tertiary)
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    Text(updatedText(now: context.date))
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
+                }
             }
 
             Spacer()
 
             Button {
-                Task { await store.refresh() }
+                Task { await store.refresh(forceClaudeQuota: true) }
             } label: {
                 ZStack {
                     Circle()
@@ -91,7 +98,6 @@ public struct MeterPopover: View {
                 .frame(width: 42, height: 42)
             }
             .buttonStyle(.plain)
-            .disabled(store.isRefreshing)
             .help("Refresh local token usage")
             .accessibilityLabel("Refresh usage")
         }
@@ -99,7 +105,39 @@ public struct MeterPopover: View {
         .padding(.top, 20)
     }
 
-    private var usageList: some View {
+    private var statusColor: Color {
+        if !store.staleProviders.isEmpty {
+            return .orange
+        }
+        if store.readings.contains(where: { $0.availability == .failed }) {
+            return .red
+        }
+        if store.readings.contains(where: \.isLow) {
+            return .orange
+        }
+        if !store.readings.contains(where: { $0.availability == .measured }) {
+            return .secondary
+        }
+        return .green
+    }
+
+    private func updatedText(now: Date) -> String {
+        guard let lastUpdated = store.lastUpdated else {
+            return store.isRefreshing ? "Scanning local records..." : "Not refreshed yet"
+        }
+        let seconds = max(Int(now.timeIntervalSince(lastUpdated)), 0)
+        if seconds < 15 { return "Updated just now" }
+        if seconds < 60 { return "Updated \(seconds)s ago" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "Updated \(minutes)m ago" }
+        return "Updated \(minutes / 60)h ago"
+    }
+}
+
+private struct ProviderUsageList: View {
+    let store: UsageStore
+
+    var body: some View {
         VStack(spacing: 0) {
             if store.readings.isEmpty {
                 ContentUnavailableView(
@@ -112,7 +150,11 @@ public struct MeterPopover: View {
                 ForEach(Array(store.readings.enumerated()), id: \.element.id) {
                     index,
                     reading in
-                    ProviderUsageRow(reading: reading)
+                    ProviderUsageRow(
+                        reading: reading,
+                        isRefreshing: store.isRefreshing(reading.id),
+                        isStale: store.staleProviders.contains(reading.id)
+                    )
 
                     if index < store.readings.count - 1 {
                         Divider()
@@ -130,8 +172,12 @@ public struct MeterPopover: View {
                 }
         }
     }
+}
 
-    private var footer: some View {
+private struct PopoverFooter: View {
+    let openSettings: OpenSettingsAction
+
+    var body: some View {
         HStack(spacing: 10) {
             Button {
                 NSApplication.shared.activate(ignoringOtherApps: true)
@@ -155,7 +201,9 @@ public struct MeterPopover: View {
         .padding(.horizontal, MeterTheme.contentPadding + 4)
         .frame(height: 52)
     }
+}
 
+extension MeterPopover {
     private func errorBanner(_ message: String) -> some View {
         Label(message, systemImage: "exclamationmark.triangle.fill")
             .font(.caption)
@@ -164,30 +212,12 @@ public struct MeterPopover: View {
             .padding(10)
             .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
     }
-
-    private var statusColor: Color {
-        if store.readings.contains(where: { $0.availability == .failed }) {
-            return .red
-        }
-        if store.readings.contains(where: \.isLow) {
-            return .orange
-        }
-        if !store.readings.contains(where: { $0.availability == .measured }) {
-            return .secondary
-        }
-        return .green
-    }
-
-    private var updatedText: String {
-        guard let lastUpdated = store.lastUpdated else {
-            return store.isRefreshing ? "Scanning local records..." : "Not refreshed yet"
-        }
-        return "Updated \(lastUpdated.formatted(.relative(presentation: .named)))"
-    }
 }
 
 private struct ProviderUsageRow: View {
     let reading: ProviderUsage
+    let isRefreshing: Bool
+    let isStale: Bool
 
     var body: some View {
         HStack(spacing: 12) {
@@ -203,6 +233,11 @@ private struct ProviderUsageRow: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                if isStale {
+                    Text("Last known value")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.orange)
+                }
             }
             .frame(width: 104, alignment: .leading)
 
@@ -238,16 +273,25 @@ private struct ProviderUsageRow: View {
             }
 
             VStack(alignment: .trailing, spacing: 5) {
-                Text(percentText)
-                    .font(.system(size: 17, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(percentColor)
+                if isRefreshing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(height: 20)
+                        .help("Updating \(reading.id.name)")
+                } else {
+                    Text(percentText)
+                        .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(percentColor)
+                }
 
-                Text(resetText)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.trailing)
-                    .lineLimit(2)
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    Text(resetText(now: context.date))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
+                        .lineLimit(2)
+                }
             }
             .frame(width: 62, alignment: .trailing)
         }
@@ -301,12 +345,12 @@ private struct ProviderUsageRow: View {
         return reading.id.accentColor
     }
 
-    private var resetText: String {
+    private func resetText(now: Date = .now) -> String {
         guard reading.remainingPercent != nil else {
             return "Plan usage\nnot exposed"
         }
         let resetAt = reading.primaryPlanWindow?.resetsAt ?? reading.resetAt
-        let duration = resetAt.timeIntervalSinceNow
+        let duration = resetAt.timeIntervalSince(now)
         guard duration > 0 else { return "Reset due" }
         return "Resets in\n\(duration.compactDuration)"
     }
@@ -326,7 +370,7 @@ private struct ProviderUsageRow: View {
     }
 
     private var accessibilitySummary: String {
-        "\(reading.id.name), \(tokenSummary), \(percentText) remaining, \(resetText)"
+        "\(reading.id.name), \(tokenSummary), \(percentText) remaining, \(resetText())"
     }
 }
 

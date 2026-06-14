@@ -9,13 +9,13 @@ export HOME="$ROOT_DIR/.home"
 export CLANG_MODULE_CACHE_PATH="$ROOT_DIR/.cache/clang"
 mkdir -p "$HOME" "$CLANG_MODULE_CACHE_PATH"
 
-APP_VERSION="${APP_VERSION:-0.1.0}"
-APP_BUILD="${APP_BUILD:-1}"
+APP_VERSION="${APP_VERSION:-0.1.1}"
+APP_BUILD="${APP_BUILD:-2}"
 APP_SIGN_IDENTITY="${APP_SIGN_IDENTITY:--}"
 
 swift build -c release --product AIMeter --disable-sandbox -Xswiftc -gnone
 BIN_DIR="$(swift build -c release --disable-sandbox -Xswiftc -gnone --show-bin-path)"
-OUTPUT_APP="$ROOT_DIR/dist/AI Meter.app"
+OUTPUT_APP="${OUTPUT_APP:-$ROOT_DIR/dist/AI Meter.app}"
 STAGE_ROOT="$(mktemp -d "$TMPDIR/aimeter-stage.XXXXXX")"
 APP_DIR="$STAGE_ROOT/AI Meter.app"
 CONTENTS_DIR="$APP_DIR/Contents"
@@ -70,11 +70,11 @@ sed -i '' \
 
 xattr -cr "$APP_DIR"
 codesign --force --deep --sign "$APP_SIGN_IDENTITY" "$APP_DIR"
+codesign --verify --deep --strict "$APP_DIR"
 
-mkdir -p "$ROOT_DIR/dist"
+mkdir -p "$(dirname "$OUTPUT_APP")"
 rm -rf "$OUTPUT_APP"
 COPYFILE_DISABLE=1 cp -R "$APP_DIR" "$OUTPUT_APP"
-xattr -cr "$OUTPUT_APP"
 codesign --verify --deep "$OUTPUT_APP"
 
 echo "$OUTPUT_APP"

@@ -18,10 +18,17 @@ AI Meter keeps provider-reported plan usage separate from locally measured
 tokens. When a client does not expose trustworthy plan quota data, the app says
 so explicitly and can optionally show a user-configured fallback budget.
 
-Automatic refresh runs while AI Meter is open and defaults to every minute.
-The interval can be changed to 30 seconds, 1 minute, 5 minutes, or 15 minutes
-from Settings. Opening the menu also refreshes data that is more than 15 seconds
-old.
+Automatic refresh runs while AI Meter is open and defaults to every five
+minutes. The interval can be changed to 1 minute, 5 minutes, or 15 minutes from
+Settings. Low Power Mode limits background refreshes to every 15 minutes.
+Opening the menu also refreshes data that is more than a minute old, or more
+than five minutes old when automatic refresh is disabled.
+
+Local log results appear provider by provider as each scan finishes. Claude
+quota checks run at most every 15 minutes during automatic refreshes because
+they launch Claude Code; failed checks are rate-limited too. Refresh Now always
+forces a fresh quota check. The most recent readings are restored immediately
+when AI Meter launches.
 
 The menu bar shows compact icons and remaining-usage bars for providers with
 live quota data. This display can be disabled from General settings.
@@ -37,7 +44,7 @@ swift test
 Build outputs:
 
 - `dist/AI Meter.app`
-- `dist/AI Meter-0.1.0.pkg`
+- `dist/AI Meter-0.1.1.pkg`
 
 The installer places AI Meter in `/Applications`. Remove it with:
 

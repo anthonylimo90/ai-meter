@@ -36,7 +36,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AIMeterTests",
-            dependencies: ["AIMeterCore"],
+            dependencies: ["AIMeterCore", "AIMeterUI"],
             path: "Tests/AIMeterTests"
         )
     ]
