@@ -4,15 +4,17 @@ import AIMeterCore
 
 public struct MeterPopover: View {
     let store: UsageStore
+    let referenceDate: Date?
     @Environment(\.openSettings) private var openSettings
 
-    public init(store: UsageStore) {
+    public init(store: UsageStore, referenceDate: Date? = nil) {
         self.store = store
+        self.referenceDate = referenceDate
     }
 
     public var body: some View {
         VStack(spacing: 0) {
-            PopoverHeader(store: store)
+            PopoverHeader(store: store, referenceDate: referenceDate)
 
             if let errorMessage = store.errorMessage {
                 errorBanner(errorMessage)
@@ -20,7 +22,7 @@ public struct MeterPopover: View {
                     .padding(.top, 12)
             }
 
-            ProviderUsageList(store: store)
+            ProviderUsageList(store: store, referenceDate: referenceDate)
                 .padding(.horizontal, MeterTheme.contentPadding)
                 .padding(.top, 16)
 
@@ -42,6 +44,7 @@ public struct MeterPopover: View {
         )
         .preferredColorScheme(.dark)
         .task {
+            guard referenceDate == nil else { return }
             await store.refreshIfStale(
                 maxAge: store.autoRefreshEnabled ? 60 : 300
             )
@@ -52,29 +55,43 @@ public struct MeterPopover: View {
 
 private struct PopoverHeader: View {
     let store: UsageStore
+    let referenceDate: Date?
 
     var body: some View {
+        Group {
+            if let referenceDate {
+                content(now: referenceDate)
+            } else {
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    content(now: context.date)
+                }
+            }
+        }
+    }
+
+    private func content(now: Date) -> some View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Meter")
                     .font(.system(size: 27, weight: .bold))
 
                 Label {
-                    Text(store.statusSummary)
+                    Text(store.statusSummary(at: now))
                         .foregroundStyle(.secondary)
                 } icon: {
                     Circle()
-                        .fill(statusColor)
+                        .fill(statusColor(at: now))
                         .frame(width: 9, height: 9)
-                        .shadow(color: statusColor.opacity(0.45), radius: 5)
+                        .shadow(
+                            color: statusColor(at: now).opacity(0.45),
+                            radius: 5
+                        )
                 }
                 .font(.system(size: 13, weight: .medium))
 
-                TimelineView(.periodic(from: .now, by: 60)) { context in
-                    Text(updatedText(now: context.date))
-                        .font(.system(size: 12))
-                        .foregroundStyle(.tertiary)
-                }
+                Text(updatedText(now: now))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.tertiary)
             }
 
             Spacer()
@@ -105,14 +122,14 @@ private struct PopoverHeader: View {
         .padding(.top, 20)
     }
 
-    private var statusColor: Color {
+    private func statusColor(at date: Date) -> Color {
         if !store.staleProviders.isEmpty {
             return .orange
         }
         if store.readings.contains(where: { $0.availability == .failed }) {
             return .red
         }
-        if store.readings.contains(where: \.isLow) {
+        if store.readings.contains(where: { $0.isLow(at: date) }) {
             return .orange
         }
         if !store.readings.contains(where: { $0.availability == .measured }) {
@@ -136,6 +153,7 @@ private struct PopoverHeader: View {
 
 private struct ProviderUsageList: View {
     let store: UsageStore
+    let referenceDate: Date?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -153,7 +171,8 @@ private struct ProviderUsageList: View {
                     ProviderUsageRow(
                         reading: reading,
                         isRefreshing: store.isRefreshing(reading.id),
-                        isStale: store.staleProviders.contains(reading.id)
+                        isStale: store.staleProviders.contains(reading.id),
+                        referenceDate: referenceDate
                     )
 
                     if index < store.readings.count - 1 {
@@ -218,8 +237,21 @@ private struct ProviderUsageRow: View {
     let reading: ProviderUsage
     let isRefreshing: Bool
     let isStale: Bool
+    let referenceDate: Date?
 
     var body: some View {
+        Group {
+            if let referenceDate {
+                content(now: referenceDate)
+            } else {
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    content(now: context.date)
+                }
+            }
+        }
+    }
+
+    private func content(now: Date) -> some View {
         HStack(spacing: 12) {
             providerBadge
 
@@ -249,19 +281,19 @@ private struct ProviderUsageRow: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
 
-                Text(planSummary)
+                Text(planSummary(at: now))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
 
                 MeterProgressBar(
-                    fraction: reading.remainingFraction ?? 0,
+                    fraction: reading.remainingFraction(at: now) ?? 0,
                     color: reading.id.accentColor,
-                    isUnavailable: reading.remainingFraction == nil
+                    isUnavailable: reading.remainingFraction(at: now) == nil
                 )
                 .frame(height: 7)
 
-                if let secondaryWindow = reading.secondaryPlanWindow {
+                if let secondaryWindow = reading.secondaryPlanWindow(at: now) {
                     Text(
                         "\(secondaryWindow.label): \(secondaryWindow.remainingPercent)% left"
                     )
@@ -279,19 +311,17 @@ private struct ProviderUsageRow: View {
                         .frame(height: 20)
                         .help("Updating \(reading.id.name)")
                 } else {
-                    Text(percentText)
+                    Text(percentText(at: now))
                         .font(.system(size: 17, weight: .semibold, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(percentColor)
+                        .foregroundStyle(percentColor(at: now))
                 }
 
-                TimelineView(.periodic(from: .now, by: 60)) { context in
-                    Text(resetText(now: context.date))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.trailing)
-                        .lineLimit(2)
-                }
+                Text(resetText(now: now))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+                    .lineLimit(2)
             }
             .frame(width: 62, alignment: .trailing)
         }
@@ -300,7 +330,7 @@ private struct ProviderUsageRow: View {
         .contentShape(Rectangle())
         .help(reading.sourceDetail)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilitySummary)
+        .accessibilityLabel(accessibilitySummary(at: now))
     }
 
     private var providerBadge: some View {
@@ -331,34 +361,35 @@ private struct ProviderUsageRow: View {
         return "\(reading.usedTokens.compactTokenString) / \(reading.tokenLimit.compactTokenString) tokens"
     }
 
-    private var percentText: String {
-        guard let remainingPercent = reading.remainingPercent else {
+    private func percentText(at date: Date) -> String {
+        guard let remainingPercent = reading.remainingPercent(at: date) else {
             return "--"
         }
         return "\(remainingPercent)%"
     }
 
-    private var percentColor: Color {
-        guard reading.remainingPercent != nil else {
+    private func percentColor(at date: Date) -> Color {
+        guard reading.remainingPercent(at: date) != nil else {
             return .secondary
         }
         return reading.id.accentColor
     }
 
     private func resetText(now: Date = .now) -> String {
-        guard reading.remainingPercent != nil else {
+        guard reading.remainingPercent(at: now) != nil else {
             return "Plan usage\nnot exposed"
         }
-        let resetAt = reading.primaryPlanWindow?.resetsAt ?? reading.resetAt
+        let resetAt = reading.primaryPlanWindow(at: now)?.resetsAt
+            ?? reading.resetAt
         let duration = resetAt.timeIntervalSince(now)
         guard duration > 0 else { return "Reset due" }
         return "Resets in\n\(duration.compactDuration)"
     }
 
-    private var planSummary: String {
-        switch reading.planUsageSource {
+    private func planSummary(at date: Date) -> String {
+        switch reading.planUsageSource(at: date) {
         case .providerReported:
-            guard let window = reading.primaryPlanWindow else {
+            guard let window = reading.primaryPlanWindow(at: date) else {
                 return "Provider-reported quota"
             }
             return "\(window.label): \(Int(window.usedPercent.rounded()))% used"
@@ -369,8 +400,8 @@ private struct ProviderUsageRow: View {
         }
     }
 
-    private var accessibilitySummary: String {
-        "\(reading.id.name), \(tokenSummary), \(percentText) remaining, \(resetText())"
+    private func accessibilitySummary(at date: Date) -> String {
+        "\(reading.id.name), \(tokenSummary), \(percentText(at: date)) remaining, \(resetText(now: date))"
     }
 }
 

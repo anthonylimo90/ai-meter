@@ -29,6 +29,7 @@ public final class UsageStore {
     var readings: [ProviderUsage]
     var configurations: [ProviderConfiguration] {
         didSet {
+            reconcileReadingsWithConfigurations()
             scheduleConfigurationPersistence()
         }
     }
@@ -83,20 +84,22 @@ public final class UsageStore {
             forKey: Self.showMenuBarMetersKey
         ) as? Bool ?? true
         let storedReadings = Self.loadReadings()
+        let now = Date()
         self.readings = configurations.filter(\.isEnabled).map { configuration in
             if let stored = storedReadings.first(where: {
                 $0.id == configuration.id
             }) {
+                let activePlanUsage = stored.planUsage?.active(at: now)
                 return ProviderUsage(
                     id: stored.id,
-                    tier: stored.planUsage?.planName ?? configuration.tier,
+                    tier: activePlanUsage?.planName ?? configuration.tier,
                     usedTokens: stored.usedTokens,
                     tokenLimit: max(configuration.tokenLimit, 0),
-                    resetAt: stored.planUsage?.windows.first?.resetsAt
+                    resetAt: activePlanUsage?.windows.first?.resetsAt
                         ?? configuration.nextResetAt,
                     availability: stored.availability,
                     sourceDetail: stored.sourceDetail,
-                    planUsage: stored.planUsage
+                    planUsage: activePlanUsage
                 )
             }
             return ProviderUsage(
@@ -120,13 +123,18 @@ public final class UsageStore {
         })?.planUsage?.observedAt
     }
 
-    public init(previewReadings: [ProviderUsage]) {
-        configurations = ProviderConfiguration.defaults()
+    public init(
+        previewReadings: [ProviderUsage],
+        previewConfigurations: [ProviderConfiguration]? = nil,
+        lastUpdated: Date = .now
+    ) {
+        configurations = previewConfigurations
+            ?? ProviderConfiguration.defaults(now: lastUpdated)
         autoRefreshEnabled = true
         refreshIntervalSeconds = UsageRefreshPolicy.defaultInterval
         showMenuBarMeters = true
         readings = previewReadings
-        lastUpdated = .now
+        self.lastUpdated = lastUpdated
         hasLoaded = true
         lastClaudeQuotaAttemptAt = previewReadings.first(where: {
             $0.id == .claude
@@ -152,8 +160,12 @@ public final class UsageStore {
     }
 
     var statusSummary: String {
+        statusSummary(at: .now)
+    }
+
+    func statusSummary(at date: Date) -> String {
         let reported = readings.filter {
-            $0.planUsageSource == .providerReported
+            $0.planUsageSource(at: date) == .providerReported
         }.count
         let measured = readings.filter {
             $0.availability == .measured
@@ -161,7 +173,7 @@ public final class UsageStore {
         let failed = readings.filter {
             $0.availability == .failed
         }.count
-        let low = readings.filter(\.isLow).count
+        let low = readings.filter { $0.isLow(at: date) }.count
 
         if low > 0 {
             return "\(low) \(low == 1 ? "limit" : "limits") running low."
@@ -263,23 +275,12 @@ public final class UsageStore {
         readings.first {
             $0.id == provider
                 && $0.planUsageSource == .providerReported
-                && $0.primaryPlanWindow != nil
+                && $0.planUsage?.active() != nil
         }
     }
 
     func resetConfiguration() {
         configurations = ProviderConfiguration.defaults()
-        readings = configurations.map {
-            ProviderUsage(
-                id: $0.id,
-                tier: $0.tier,
-                usedTokens: 0,
-                tokenLimit: $0.tokenLimit,
-                resetAt: $0.nextResetAt,
-                availability: .unavailable,
-                sourceDetail: "Refresh to scan local records"
-            )
-        }
     }
 
     func isRefreshing(_ provider: ProviderID) -> Bool {
@@ -291,6 +292,7 @@ public final class UsageStore {
         generation: UUID
     ) async {
         normalizeResetDates()
+        reconcileReadingsWithConfigurations()
         let activeConfigurations = configurations.filter(\.isEnabled)
         let now = Date()
         let shouldFetchClaudeQuota = activeConfigurations.contains {
@@ -335,6 +337,7 @@ public final class UsageStore {
         }
         isRefreshing = false
         refreshingProviders = []
+        reconcileReadingsWithConfigurations()
         errorMessage = hadWarnings
             ? "Some local usage records could not be read."
             : nil
@@ -343,26 +346,34 @@ public final class UsageStore {
         persistReadings()
     }
 
-    private func merge(
+    func merge(
         _ result: ScanResult,
         preservingClaudeQuota: Bool
     ) {
         guard let configuration = configurations.first(where: {
-            $0.id == result.provider
+            $0.id == result.provider && $0.isEnabled
         }) else {
             return
         }
         let previous = readings.first { $0.id == result.provider }
         if result.availability == .failed, let previous {
+            let planUsage = resolvedPlanUsage(
+                result: result,
+                previous: previous
+            )
             let staleReading = ProviderUsage(
                 id: previous.id,
-                tier: previous.tier,
+                tier: planUsage?.planName ?? configuration.tier,
                 usedTokens: previous.usedTokens,
-                tokenLimit: previous.tokenLimit,
-                resetAt: previous.resetAt,
+                tokenLimit: max(configuration.tokenLimit, 0),
+                resetAt: planUsage?.windows.first?.resetsAt
+                    ?? configuration.nextResetAt,
                 availability: previous.availability,
-                sourceDetail: "\(result.detail); showing last known value",
-                planUsage: previous.planUsage
+                sourceDetail: sourceDetail(
+                    for: result,
+                    suffix: "showing last known local token value"
+                ),
+                planUsage: planUsage
             )
             if let index = readings.firstIndex(where: {
                 $0.id == result.provider
@@ -373,11 +384,11 @@ public final class UsageStore {
             return
         }
         staleProviders.remove(result.provider)
-        let preservedPlanUsage = result.provider == .claude
-            && (preservingClaudeQuota || result.planUsage == nil)
-            ? previous?.planUsage
-            : nil
-        let planUsage = result.planUsage ?? preservedPlanUsage
+        let planUsage = resolvedPlanUsage(
+            result: result,
+            previous: previous,
+            preservingClaudeQuota: preservingClaudeQuota
+        )
         let reading = ProviderUsage(
             id: configuration.id,
             tier: planUsage?.planName ?? configuration.tier,
@@ -386,7 +397,7 @@ public final class UsageStore {
             resetAt: planUsage?.windows.first?.resetsAt
                 ?? configuration.nextResetAt,
             availability: result.availability,
-            sourceDetail: result.detail,
+            sourceDetail: sourceDetail(for: result),
             planUsage: planUsage
         )
         if let index = readings.firstIndex(where: { $0.id == result.provider }) {
@@ -398,6 +409,77 @@ public final class UsageStore {
                     < ProviderID.allCases.firstIndex(of: $1.id)!
             }
         }
+    }
+
+    private func resolvedPlanUsage(
+        result: ScanResult,
+        previous: ProviderUsage?,
+        preservingClaudeQuota: Bool = false
+    ) -> PlanUsageSnapshot? {
+        switch result.planUsageStatus {
+        case .measured:
+            return result.planUsage?.active()
+        case .notRequested:
+            guard result.provider == .claude || preservingClaudeQuota else {
+                return nil
+            }
+            return previous?.planUsage?.active()
+        case .unavailable, .failed:
+            return nil
+        }
+    }
+
+    private func sourceDetail(
+        for result: ScanResult,
+        suffix: String? = nil
+    ) -> String {
+        var parts = [result.detail]
+        switch result.planUsageStatus {
+        case .notRequested, .measured:
+            break
+        case let .unavailable(message), let .failed(message):
+            if !result.detail.localizedCaseInsensitiveContains(message) {
+                parts.append(message)
+            }
+        }
+        if let suffix {
+            parts.append(suffix)
+        }
+        return parts.joined(separator: "; ")
+    }
+
+    private func reconcileReadingsWithConfigurations(now: Date = .now) {
+        let enabled = configurations.filter(\.isEnabled)
+        let enabledIDs = Set(enabled.map(\.id))
+        readings = enabled.map { configuration in
+            guard let previous = readings.first(where: {
+                $0.id == configuration.id
+            }) else {
+                return ProviderUsage(
+                    id: configuration.id,
+                    tier: configuration.tier,
+                    usedTokens: 0,
+                    tokenLimit: max(configuration.tokenLimit, 0),
+                    resetAt: configuration.nextResetAt,
+                    availability: .unavailable,
+                    sourceDetail: "Refresh to scan local records"
+                )
+            }
+            let activePlanUsage = previous.planUsage?.active(at: now)
+            return ProviderUsage(
+                id: previous.id,
+                tier: activePlanUsage?.planName ?? configuration.tier,
+                usedTokens: previous.usedTokens,
+                tokenLimit: max(configuration.tokenLimit, 0),
+                resetAt: activePlanUsage?.windows.first?.resetsAt
+                    ?? configuration.nextResetAt,
+                availability: previous.availability,
+                sourceDetail: previous.sourceDetail,
+                planUsage: activePlanUsage
+            )
+        }
+        refreshingProviders.formIntersection(enabledIDs)
+        staleProviders.formIntersection(enabledIDs)
     }
 
     private func normalizeResetDates(now: Date = .now) {
@@ -434,7 +516,21 @@ public final class UsageStore {
     }
 
     private func persistReadings() {
-        guard let data = try? JSONEncoder().encode(readings) else { return }
+        let now = Date()
+        let sanitized = readings.map { reading in
+            let planUsage = reading.planUsage?.active(at: now)
+            return ProviderUsage(
+                id: reading.id,
+                tier: planUsage?.planName ?? reading.tier,
+                usedTokens: reading.usedTokens,
+                tokenLimit: reading.tokenLimit,
+                resetAt: planUsage?.windows.first?.resetsAt ?? reading.resetAt,
+                availability: reading.availability,
+                sourceDetail: reading.sourceDetail,
+                planUsage: planUsage
+            )
+        }
+        guard let data = try? JSONEncoder().encode(sanitized) else { return }
         UserDefaults.standard.set(data, forKey: Self.readingsKey)
         UserDefaults.standard.set(lastUpdated, forKey: Self.lastUpdatedKey)
     }
@@ -500,6 +596,9 @@ enum UsageRefreshPolicy {
             return true
         }
         guard let lastAttempt else {
+            return true
+        }
+        if lastAttempt > now {
             return true
         }
         return now.timeIntervalSince(lastAttempt) >= claudeQuotaInterval

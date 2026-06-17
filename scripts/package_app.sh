@@ -5,17 +5,33 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
+source "$ROOT_DIR/Config/version.env"
+
 export HOME="$ROOT_DIR/.home"
 export CLANG_MODULE_CACHE_PATH="$ROOT_DIR/.cache/clang"
+export COPYFILE_DISABLE=1
 mkdir -p "$HOME" "$CLANG_MODULE_CACHE_PATH"
 
-APP_VERSION="${APP_VERSION:-0.1.1}"
-APP_BUILD="${APP_BUILD:-2}"
+APP_VERSION="${APP_VERSION_OVERRIDE:-$APP_VERSION}"
+APP_BUILD="${APP_BUILD_OVERRIDE:-$APP_BUILD}"
 APP_SIGN_IDENTITY="${APP_SIGN_IDENTITY:--}"
-
-swift build -c release --product AIMeter --disable-sandbox -Xswiftc -gnone
-BIN_DIR="$(swift build -c release --disable-sandbox -Xswiftc -gnone --show-bin-path)"
+ARCHS="${ARCHS:-}"
 OUTPUT_APP="${OUTPUT_APP:-$ROOT_DIR/dist/AI Meter.app}"
+
+BUILD_ARGS=(
+    -c release
+    --product AIMeter
+    --disable-sandbox
+    -Xswiftc -gnone
+)
+if [[ -n "$ARCHS" ]]; then
+    for arch in ${=ARCHS}; do
+        BUILD_ARGS+=(--arch "$arch")
+    done
+fi
+
+swift build "${BUILD_ARGS[@]}"
+BIN_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
 STAGE_ROOT="$(mktemp -d "$TMPDIR/aimeter-stage.XXXXXX")"
 APP_DIR="$STAGE_ROOT/AI Meter.app"
 CONTENTS_DIR="$APP_DIR/Contents"
@@ -27,8 +43,12 @@ install -m 755 "$BIN_DIR/AIMeter" "$CONTENTS_DIR/MacOS/AIMeter"
 
 RESOURCE_BUNDLE="$BIN_DIR/AIMeter_AIMeterUI.bundle"
 if [[ -d "$RESOURCE_BUNDLE" ]]; then
-    ditto "$RESOURCE_BUNDLE" "$CONTENTS_DIR/Resources"
+    ditto \
+        "$RESOURCE_BUNDLE" \
+        "$CONTENTS_DIR/Resources/AIMeter_AIMeterUI.bundle"
 fi
+install -m 644 "$ROOT_DIR/Resources/AppIcon.icns" \
+    "$CONTENTS_DIR/Resources/AppIcon.icns"
 
 cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -41,6 +61,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <string>AI Meter</string>
     <key>CFBundleExecutable</key>
     <string>AIMeter</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.anthonylimo.aimeter</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -68,13 +90,22 @@ sed -i '' \
     -e "s/__APP_BUILD__/$APP_BUILD/g" \
     "$CONTENTS_DIR/Info.plist"
 
-xattr -cr "$APP_DIR"
-codesign --force --deep --sign "$APP_SIGN_IDENTITY" "$APP_DIR"
-codesign --verify --deep --strict "$APP_DIR"
-
 mkdir -p "$(dirname "$OUTPUT_APP")"
 rm -rf "$OUTPUT_APP"
-COPYFILE_DISABLE=1 cp -R "$APP_DIR" "$OUTPUT_APP"
-codesign --verify --deep "$OUTPUT_APP"
+ditto --norsrc --noextattr --noqtn --noacl "$APP_DIR" "$OUTPUT_APP"
+xattr -cr "$OUTPUT_APP" 2>/dev/null || true
 
+if [[ "$APP_SIGN_IDENTITY" == "-" ]]; then
+    codesign --force --deep --sign - "$OUTPUT_APP"
+else
+    codesign \
+        --force \
+        --deep \
+        --options runtime \
+        --timestamp \
+        --sign "$APP_SIGN_IDENTITY" \
+        "$OUTPUT_APP"
+fi
+
+"$ROOT_DIR/scripts/validate_app.sh" "$OUTPUT_APP" "$ARCHS"
 echo "$OUTPUT_APP"

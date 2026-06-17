@@ -38,8 +38,19 @@ extension ProviderID {
 private enum BadgeImageCache {
     static let images: [ProviderID: CGImage] = Dictionary(
         uniqueKeysWithValues: ProviderID.allCases.compactMap { provider in
+            let packagedResourceBundle = Bundle.main.resourceURL
+                .map {
+                    $0.appendingPathComponent(
+                        "AIMeter_AIMeterUI.bundle",
+                        isDirectory: true
+                    )
+                }
+                .flatMap(Bundle.init(url:))
             guard
                 let url = Bundle.main.url(
+                    forResource: provider.assetName,
+                    withExtension: "png"
+                ) ?? packagedResourceBundle?.url(
                     forResource: provider.assetName,
                     withExtension: "png"
                 ) ?? Bundle.module.url(

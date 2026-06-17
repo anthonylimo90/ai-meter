@@ -2,6 +2,9 @@ import Darwin
 import Foundation
 
 public enum LocalUsageScanner {
+    private static let maximumJSONDocumentSize = 25_000_000
+    private static let maximumLineSize = 8_000_000
+
     public static func results(
         configurations: [ProviderConfiguration],
         fetchClaudeQuota: Bool = true
@@ -17,7 +20,9 @@ public enum LocalUsageScanner {
                                 claudeUsage: {
                                     fetchClaudeQuota
                                         ? ClaudeUsageProbe.fetch()
-                                        : nil
+                                        : PlanUsageReadResult(
+                                            status: .notRequested
+                                        )
                                 }
                             )
                         }
@@ -58,7 +63,7 @@ public enum LocalUsageScanner {
         configuration: ProviderConfiguration,
         rootsOverride: [URL]? = nil,
         now: Date = .now,
-        claudeUsage: @Sendable () -> PlanUsageSnapshot? = {
+        claudeUsage: @Sendable () -> PlanUsageReadResult = {
             ClaudeUsageProbe.fetch()
         }
     ) -> ScanResult {
@@ -68,10 +73,11 @@ public enum LocalUsageScanner {
             to: configuration.nextResetAt
         ) ?? .distantPast
 
-        let roots = rootsOverride ?? resolvedRoots(for: configuration)
-        let files: [URL]
+        let roots = (rootsOverride ?? resolvedRoots(for: configuration))
+            .map { UsagePathResolver.canonicalURL(for: $0.path) }
+        let inventory: UsageFileInventory
         do {
-            files = try DirectoryInventoryCache.files(
+            inventory = try DirectoryInventoryCache.inventory(
                 in: roots,
                 modifiedAfter: windowStart
             )
@@ -86,12 +92,28 @@ public enum LocalUsageScanner {
 
         switch configuration.id {
         case .claude:
-            let tokenScan = scanClaude(files: files, after: windowStart)
-            let planUsage = claudeUsage()
+            let tokenScan = scanClaude(
+                files: inventory.files,
+                after: windowStart,
+                inventoryWarnings: inventory.warningCount
+            )
+            let rawPlanReadResult = claudeUsage()
+            let activePlanUsage = rawPlanReadResult.snapshot?.active(at: now)
+            let planStatus: PlanUsageReadStatus
+            if rawPlanReadResult.status == .measured, activePlanUsage == nil {
+                planStatus = .unavailable(
+                    "Claude plan limits have expired"
+                )
+            } else {
+                planStatus = rawPlanReadResult.status
+            }
             return scanResult(
                 configuration: configuration,
                 tokenScan: tokenScan,
-                planUsage: planUsage,
+                planReadResult: PlanUsageReadResult(
+                    status: planStatus,
+                    snapshot: activePlanUsage
+                ),
                 hasRoots: !roots.isEmpty
             )
         case .openAI:
@@ -103,11 +125,21 @@ public enum LocalUsageScanner {
                     detail: "No local data folder is available"
                 )
             }
-            let scan = scanCodex(files: files, after: windowStart)
+            let scan = scanCodex(
+                files: inventory.files,
+                after: windowStart,
+                inventoryWarnings: inventory.warningCount
+            )
+            let planUsage = scan.planUsage?.active(at: now)
             return scanResult(
                 configuration: configuration,
                 tokenScan: scan.tokenScan,
-                planUsage: activePlanUsage(scan.planUsage, now: now),
+                planReadResult: PlanUsageReadResult(
+                    status: planUsage == nil
+                        ? .unavailable("No active Codex plan limits were found")
+                        : .measured,
+                    snapshot: planUsage
+                ),
                 hasRoots: true
             )
         case .gemini, .cursor, .copilot:
@@ -120,14 +152,19 @@ public enum LocalUsageScanner {
                 )
             }
             let tokenScan = scanGeneric(
-                files: files,
+                files: inventory.files,
                 provider: configuration.id,
-                after: windowStart
+                after: windowStart,
+                inventoryWarnings: inventory.warningCount
             )
             return scanResult(
                 configuration: configuration,
                 tokenScan: tokenScan,
-                planUsage: nil,
+                planReadResult: PlanUsageReadResult(
+                    status: .unavailable(
+                        "Provider-reported plan usage is not exposed"
+                    )
+                ),
                 hasRoots: true
             )
         }
@@ -136,36 +173,23 @@ public enum LocalUsageScanner {
     private static func resolvedRoots(
         for configuration: ProviderConfiguration
     ) -> [URL] {
-        var paths = configuration.id.builtInPaths
-        let trimmedCustomPath = configuration.customPath
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedCustomPath.isEmpty {
-            paths.append(trimmedCustomPath)
-        }
-
-        return paths
-            .map(expandHome(in:))
-            .map(URL.init(fileURLWithPath:))
-            .filter { FileManager.default.fileExists(atPath: $0.path) }
+        UsagePathResolver.existingRoots(
+            builtInPaths: configuration.id.builtInPaths,
+            customPath: configuration.customPath
+        )
     }
 
-    private static func expandHome(in path: String) -> String {
-        guard path.hasPrefix("~") else { return path }
-        return FileManager.default.homeDirectoryForCurrentUser.path
-            + String(path.dropFirst())
-    }
-
-    fileprivate static func usageFiles(
+    fileprivate static func usageInventory(
         in roots: [URL],
         modifiedAfter windowStart: Date
-    ) throws -> [URL] {
+    ) throws -> UsageFileInventory {
         let keys: [URLResourceKey] = [
             .isRegularFileKey,
             .contentModificationDateKey,
             .fileSizeKey
         ]
-        let supportedExtensions = Set(["json", "jsonl", "log"])
-        var files: [URL] = []
+        var filesByPath: [String: URL] = [:]
+        var warningCount = 0
 
         for root in roots {
             var isDirectory: ObjCBool = false
@@ -177,7 +201,21 @@ public enum LocalUsageScanner {
             }
 
             if !isDirectory.boolValue {
-                files.append(root)
+                let canonical = UsagePathResolver.canonicalURL(for: root.path)
+                let pathExtension = canonical.pathExtension.lowercased()
+                guard UsagePathResolver.supportedExtensions.contains(
+                    pathExtension
+                ) else {
+                    warningCount += 1
+                    continue
+                }
+                let values = try? canonical.resourceValues(forKeys: Set(keys))
+                if pathExtension == "json",
+                   (values?.fileSize ?? 0) > maximumJSONDocumentSize {
+                    warningCount += 1
+                    continue
+                }
+                filesByPath[canonical.path] = canonical
                 continue
             }
 
@@ -190,28 +228,40 @@ public enum LocalUsageScanner {
             }
 
             for case let fileURL as URL in enumerator {
-                guard supportedExtensions.contains(fileURL.pathExtension.lowercased()) else {
+                let canonical = UsagePathResolver.canonicalURL(for: fileURL.path)
+                let pathExtension = canonical.pathExtension.lowercased()
+                guard UsagePathResolver.supportedExtensions.contains(
+                    pathExtension
+                ) else {
                     continue
                 }
-                let values = try? fileURL.resourceValues(forKeys: Set(keys))
+                let values = try? canonical.resourceValues(forKeys: Set(keys))
                 guard values?.isRegularFile == true else { continue }
-                guard (values?.fileSize ?? 0) <= 25_000_000 else { continue }
+                if pathExtension == "json",
+                   (values?.fileSize ?? 0) > maximumJSONDocumentSize {
+                    warningCount += 1
+                    continue
+                }
                 guard (values?.contentModificationDate ?? .distantPast) >= windowStart else {
                     continue
                 }
-                files.append(fileURL)
+                filesByPath[canonical.path] = canonical
             }
         }
 
-        return files.sorted { $0.path < $1.path }
+        return UsageFileInventory(
+            files: filesByPath.values.sorted { $0.path < $1.path },
+            warningCount: warningCount
+        )
     }
 
     private static func scanResult(
         configuration: ProviderConfiguration,
         tokenScan: TokenScan,
-        planUsage: PlanUsageSnapshot?,
+        planReadResult: PlanUsageReadResult,
         hasRoots: Bool
     ) -> ScanResult {
+        let planUsage = planReadResult.snapshot
         let availability: UsageAvailability
         if tokenScan.tokens > 0 {
             availability = .measured
@@ -242,6 +292,10 @@ public enum LocalUsageScanner {
             detail += "; skipped \(tokenScan.failedFiles) unreadable "
                 + (tokenScan.failedFiles == 1 ? "file" : "files")
         }
+        if tokenScan.warningCount > 0 {
+            detail += "; skipped \(tokenScan.warningCount) oversized or unsupported "
+                + (tokenScan.warningCount == 1 ? "record" : "records")
+        }
 
         return ScanResult(
             provider: configuration.id,
@@ -249,18 +303,21 @@ public enum LocalUsageScanner {
             availability: availability,
             detail: detail,
             planUsage: planUsage,
-            hasWarnings: tokenScan.failedFiles > 0
+            planUsageStatus: planReadResult.status,
+            hasWarnings: tokenScan.failedFiles > 0 || tokenScan.warningCount > 0
         )
     }
 
     private static func scanCodex(
         files: [URL],
-        after windowStart: Date
+        after windowStart: Date,
+        inventoryWarnings: Int
     ) -> CodexScan {
         var total = 0
         var newestPlanUsage: (date: Date, snapshot: PlanUsageSnapshot)?
         var readableFiles = 0
         var failedFiles = 0
+        var warningCount = inventoryWarnings
         let candidateFiles = files.filter {
             $0.pathExtension.lowercased() == "jsonl"
         }
@@ -278,6 +335,7 @@ public enum LocalUsageScanner {
                     newestPlanUsage = snapshot
                 }
                 readableFiles += 1
+                warningCount += contribution.warningCount
                 total += max(
                     contribution.sessionMaximum - contribution.baseline,
                     0
@@ -291,7 +349,8 @@ public enum LocalUsageScanner {
             tokens: total,
             candidateFiles: candidateFiles.count,
             readableFiles: readableFiles,
-            failedFiles: failedFiles
+            failedFiles: failedFiles,
+            warningCount: warningCount
         )
         guard let latest = newestPlanUsage?.snapshot else {
             return CodexScan(tokenScan: tokenScan, planUsage: nil)
@@ -302,28 +361,15 @@ public enum LocalUsageScanner {
         )
     }
 
-    private static func activePlanUsage(
-        _ snapshot: PlanUsageSnapshot?,
-        now: Date
-    ) -> PlanUsageSnapshot? {
-        guard let snapshot else { return nil }
-        let activeWindows = snapshot.windows.filter { $0.resetsAt > now }
-        guard !activeWindows.isEmpty else { return nil }
-        return PlanUsageSnapshot(
-            source: snapshot.source,
-            planName: snapshot.planName,
-            windows: activeWindows,
-            observedAt: snapshot.observedAt
-        )
-    }
-
     private static func scanClaude(
         files: [URL],
-        after windowStart: Date
+        after windowStart: Date,
+        inventoryWarnings: Int
     ) -> TokenScan {
         var messageTotals: [String: Int] = [:]
         var readableFiles = 0
         var failedFiles = 0
+        var warningCount = inventoryWarnings
         let candidateFiles = files.filter {
             $0.pathExtension.lowercased() == "jsonl"
         }
@@ -340,6 +386,7 @@ public enum LocalUsageScanner {
                     messageTotals[key] = max(messageTotals[key] ?? 0, tokens)
                 }
                 readableFiles += 1
+                warningCount += contribution.warningCount
             } catch {
                 failedFiles += 1
             }
@@ -349,18 +396,21 @@ public enum LocalUsageScanner {
             tokens: messageTotals.values.reduce(0, +),
             candidateFiles: candidateFiles.count,
             readableFiles: readableFiles,
-            failedFiles: failedFiles
+            failedFiles: failedFiles,
+            warningCount: warningCount
         )
     }
 
     private static func scanGeneric(
         files: [URL],
         provider: ProviderID,
-        after windowStart: Date
+        after windowStart: Date,
+        inventoryWarnings: Int
     ) -> TokenScan {
         var records: [String: Int] = [:]
         var readableFiles = 0
         var failedFiles = 0
+        var warningCount = inventoryWarnings
 
         for file in files {
             guard !Task.isCancelled else { break }
@@ -375,6 +425,7 @@ public enum LocalUsageScanner {
                     for (key, tokens) in contribution.records {
                         records[key] = max(records[key] ?? 0, tokens)
                     }
+                    warningCount += contribution.warningCount
                 } else if pathExtension == "json" {
                     let contribution = try IncrementalFileCache.jsonContribution(
                         for: file,
@@ -394,7 +445,8 @@ public enum LocalUsageScanner {
             tokens: records.values.reduce(0, +),
             candidateFiles: files.count,
             readableFiles: readableFiles,
-            failedFiles: failedFiles
+            failedFiles: failedFiles,
+            warningCount: warningCount
         )
     }
 
@@ -440,7 +492,7 @@ public enum LocalUsageScanner {
         in file: URL,
         fromOffset offset: UInt64 = 0,
         body: ([String: Any]) -> Void
-    ) throws -> UInt64 {
+    ) throws -> JSONLineReadResult {
         let handle = try FileHandle(forReadingFrom: file)
         defer {
             try? handle.close()
@@ -449,21 +501,47 @@ public enum LocalUsageScanner {
         try handle.seek(toOffset: offset)
         var pending = Data()
         var processedOffset = offset
+        var skippedOversizedRecords = 0
+        var discardingOversizedRecord = false
         while let chunk = try handle.read(upToCount: 64 * 1_024),
               !chunk.isEmpty {
+            try Task.checkCancellation()
             pending.append(chunk)
             while let newline = pending.firstIndex(of: 0x0A) {
                 let line = pending[..<newline]
-                parseJSONLine(Data(line), body: body)
+                if discardingOversizedRecord {
+                    discardingOversizedRecord = false
+                } else if line.count > maximumLineSize {
+                    skippedOversizedRecords += 1
+                } else {
+                    parseJSONLine(Data(line), body: body)
+                }
                 processedOffset += UInt64(newline + 1)
                 pending.removeSubrange(...newline)
             }
+            if pending.count > maximumLineSize {
+                if !discardingOversizedRecord {
+                    skippedOversizedRecords += 1
+                }
+                processedOffset += UInt64(pending.count)
+                pending.removeAll(keepingCapacity: true)
+                discardingOversizedRecord = true
+            }
         }
-        if !pending.isEmpty,
-           parseJSONLine(pending, body: body) {
-            processedOffset += UInt64(pending.count)
+        if !pending.isEmpty {
+            if discardingOversizedRecord || pending.count > maximumLineSize {
+                if !discardingOversizedRecord {
+                    skippedOversizedRecords += 1
+                }
+                processedOffset += UInt64(pending.count)
+            } else if parseJSONLine(pending, body: body) {
+                processedOffset += UInt64(pending.count)
+            }
         }
-        return processedOffset
+        return JSONLineReadResult(
+            processedOffset: processedOffset,
+            skippedOversizedRecords: skippedOversizedRecords
+        )
     }
 
     @discardableResult
@@ -521,6 +599,17 @@ private struct TokenScan: Sendable {
     let candidateFiles: Int
     let readableFiles: Int
     let failedFiles: Int
+    let warningCount: Int
+}
+
+private struct UsageFileInventory: Sendable {
+    let files: [URL]
+    let warningCount: Int
+}
+
+private struct JSONLineReadResult: Sendable {
+    let processedOffset: UInt64
+    let skippedOversizedRecords: Int
 }
 
 private struct CodexScan: Sendable {
@@ -532,6 +621,8 @@ private struct FileSignature: Hashable, Sendable {
     let path: String
     let modifiedAt: Date
     let size: Int
+    let device: UInt64
+    let inode: UInt64
 }
 
 private struct InventoryCacheKey: Hashable, Sendable {
@@ -541,7 +632,7 @@ private struct InventoryCacheKey: Hashable, Sendable {
 
 private struct DirectoryInventoryEntry: Sendable {
     let createdAt: Date
-    let files: [URL]
+    let inventory: UsageFileInventory
 }
 
 private enum DirectoryInventoryCache {
@@ -549,10 +640,10 @@ private enum DirectoryInventoryCache {
     nonisolated(unsafe)
     private static var entries: [InventoryCacheKey: DirectoryInventoryEntry] = [:]
 
-    static func files(
+    static func inventory(
         in roots: [URL],
         modifiedAfter windowStart: Date
-    ) throws -> [URL] {
+    ) throws -> UsageFileInventory {
         ensureWatchers(for: roots)
         let key = InventoryCacheKey(
             roots: roots.map(\.standardizedFileURL.path).sorted(),
@@ -560,16 +651,16 @@ private enum DirectoryInventoryCache {
         )
         if let cached = lock.withLock({ entries[key] }),
            Date().timeIntervalSince(cached.createdAt) < 5 {
-            return cached.files
+            return cached.inventory
         }
-        let files = try LocalUsageScanner.usageFiles(
+        let inventory = try LocalUsageScanner.usageInventory(
             in: roots,
             modifiedAfter: windowStart
         )
         lock.withLock {
             entries[key] = DirectoryInventoryEntry(
                 createdAt: .now,
-                files: files
+                inventory: inventory
             )
             if entries.count > 20 {
                 entries = entries.filter {
@@ -577,7 +668,7 @@ private enum DirectoryInventoryCache {
                 }
             }
         }
-        return files
+        return inventory
     }
 
     private static func ensureWatchers(for roots: [URL]) {
@@ -631,10 +722,12 @@ private struct CodexFileContribution: Sendable {
         date: Date,
         snapshot: PlanUsageSnapshot
     )?
+    var warningCount = 0
 }
 
 private struct TokenFileContribution: Sendable {
     var records: [String: Int] = [:]
+    var warningCount = 0
 }
 
 private enum FileContribution: Sendable {
@@ -644,82 +737,98 @@ private enum FileContribution: Sendable {
 
 private struct IncrementalFileEntry: Sendable {
     let windowStart: Date
-    let modifiedAt: Date
-    let size: Int
+    let signature: FileSignature
     let processedOffset: UInt64
+    let headLength: UInt64
+    let headFingerprint: UInt64
+    let boundaryFingerprint: UInt64
     let contribution: FileContribution
+}
+
+private final class FileLockEntry: @unchecked Sendable {
+    let lock = NSLock()
+    var users = 0
 }
 
 private enum IncrementalFileCache {
     private static let lock = NSLock()
     nonisolated(unsafe)
     private static var entries: [String: IncrementalFileEntry] = [:]
+    nonisolated(unsafe)
+    private static var fileLocks: [String: FileLockEntry] = [:]
 
     static func codexContribution(
         for file: URL,
         windowStart: Date
     ) throws -> CodexFileContribution {
-        let signature = fileSignature(file)
-        let path = file.standardizedFileURL.path
+        let path = UsagePathResolver.canonicalURL(for: file.path).path
         let cacheKey = "\(ProviderID.openAI.rawValue)|\(path)"
-        let cached = lock.withLock { entries[cacheKey] }
-        var contribution: CodexFileContribution
-        var offset: UInt64
-        if let cached,
-           cached.windowStart == windowStart,
-           cached.size <= signature.size,
-           case let .codex(value) = cached.contribution {
-            if cached.size == signature.size,
-               cached.modifiedAt == signature.modifiedAt {
-                return value
+        return try withFileLock(for: cacheKey) {
+            let signature = try fileSignature(file)
+            let cached = lock.withLock { entries[cacheKey] }
+            var contribution: CodexFileContribution
+            var offset: UInt64
+            if let cached,
+               try canReuse(
+                   cached,
+                   for: file,
+                   signature: signature,
+                   windowStart: windowStart
+               ),
+               case let .codex(value) = cached.contribution {
+                if cached.signature.size == signature.size,
+                   cached.signature.modifiedAt == signature.modifiedAt {
+                    return value
+                }
+                contribution = value
+                offset = cached.processedOffset
+            } else {
+                contribution = CodexFileContribution()
+                offset = 0
             }
-            contribution = value
-            offset = cached.processedOffset
-        } else {
-            contribution = CodexFileContribution()
-            offset = 0
-        }
 
-        let newOffset = try LocalUsageScanner.forEachJSONLine(
-            in: file,
-            fromOffset: offset
-        ) { object in
-            guard let date = LocalUsageScanner.recordDate(in: object) else {
-                return
-            }
-            if let total = TokenLogParser.codexSessionTotal(in: object) {
-                if date < windowStart {
-                    contribution.baseline = max(contribution.baseline, total)
-                } else {
-                    contribution.sessionMaximum = max(
-                        contribution.sessionMaximum,
-                        total
+            let readResult = try LocalUsageScanner.forEachJSONLine(
+                in: file,
+                fromOffset: offset
+            ) { object in
+                guard let date = LocalUsageScanner.recordDate(in: object) else {
+                    return
+                }
+                if let total = TokenLogParser.codexSessionTotal(in: object) {
+                    if date < windowStart {
+                        contribution.baseline = max(contribution.baseline, total)
+                    } else {
+                        contribution.sessionMaximum = max(
+                            contribution.sessionMaximum,
+                            total
+                        )
+                    }
+                }
+                if date >= windowStart,
+                   let snapshot = TokenLogParser.codexPlanUsage(in: object),
+                   contribution.newestPlanUsage == nil
+                    || date > contribution.newestPlanUsage!.date {
+                    contribution.newestPlanUsage = (
+                        date,
+                        PlanUsageSnapshot(
+                            source: snapshot.source,
+                            planName: snapshot.planName,
+                            windows: snapshot.windows,
+                            observedAt: date
+                        )
                     )
                 }
             }
-            if date >= windowStart,
-               let snapshot = TokenLogParser.codexPlanUsage(in: object),
-               contribution.newestPlanUsage == nil
-                || date > contribution.newestPlanUsage!.date {
-                contribution.newestPlanUsage = (
-                    date,
-                    PlanUsageSnapshot(
-                        source: snapshot.source,
-                        planName: snapshot.planName,
-                        windows: snapshot.windows,
-                        observedAt: date
-                    )
-                )
-            }
+            contribution.warningCount += readResult.skippedOversizedRecords
+            try store(
+                key: cacheKey,
+                file: file,
+                windowStart: windowStart,
+                processedOffset: readResult.processedOffset,
+                contribution: .codex(contribution)
+            )
+            return contribution
         }
-        store(
-            key: cacheKey,
-            signature: signature,
-            windowStart: windowStart,
-            processedOffset: newOffset,
-            contribution: .codex(contribution)
-        )
-        return contribution
     }
 
     static func tokenContribution(
@@ -727,125 +836,239 @@ private enum IncrementalFileCache {
         provider: ProviderID,
         windowStart: Date
     ) throws -> TokenFileContribution {
-        let signature = fileSignature(file)
-        let path = file.standardizedFileURL.path
+        let path = UsagePathResolver.canonicalURL(for: file.path).path
         let cacheKey = "\(provider.rawValue)|\(path)"
-        let cached = lock.withLock { entries[cacheKey] }
-        var contribution: TokenFileContribution
-        var offset: UInt64
-        if let cached,
-           cached.windowStart == windowStart,
-           cached.size <= signature.size,
-           case let .tokens(value) = cached.contribution {
-            if cached.size == signature.size,
-               cached.modifiedAt == signature.modifiedAt {
-                return value
+        return try withFileLock(for: cacheKey) {
+            let signature = try fileSignature(file)
+            let cached = lock.withLock { entries[cacheKey] }
+            var contribution: TokenFileContribution
+            var offset: UInt64
+            if let cached,
+               try canReuse(
+                   cached,
+                   for: file,
+                   signature: signature,
+                   windowStart: windowStart
+               ),
+               case let .tokens(value) = cached.contribution {
+                if cached.signature.size == signature.size,
+                   cached.signature.modifiedAt == signature.modifiedAt {
+                    return value
+                }
+                contribution = value
+                offset = cached.processedOffset
+            } else {
+                contribution = TokenFileContribution()
+                offset = 0
             }
-            contribution = value
-            offset = cached.processedOffset
-        } else {
-            contribution = TokenFileContribution()
-            offset = 0
-        }
 
-        let newOffset = try LocalUsageScanner.forEachJSONLine(
-            in: file,
-            fromOffset: offset
-        ) { object in
-            guard let date = LocalUsageScanner.recordDate(in: object),
-                  date >= windowStart else {
-                return
+            let readResult = try LocalUsageScanner.forEachJSONLine(
+                in: file,
+                fromOffset: offset
+            ) { object in
+                guard let date = LocalUsageScanner.recordDate(in: object),
+                      date >= windowStart else {
+                    return
+                }
+                let usage = provider == .claude
+                    ? TokenLogParser.claudeUsage(in: object)
+                    : TokenLogParser.genericUsage(in: object)
+                guard let usage else { return }
+                let key = usage.identifier
+                    ?? "\(path):\(contribution.records.count)"
+                contribution.records[key] = max(
+                    contribution.records[key] ?? 0,
+                    usage.tokens
+                )
             }
-            let usage = provider == .claude
-                ? TokenLogParser.claudeUsage(in: object)
-                : TokenLogParser.genericUsage(in: object)
-            guard let usage else { return }
-            let key = usage.identifier
-                ?? "\(path):\(contribution.records.count)"
-            contribution.records[key] = max(
-                contribution.records[key] ?? 0,
-                usage.tokens
+            contribution.warningCount += readResult.skippedOversizedRecords
+            try store(
+                key: cacheKey,
+                file: file,
+                windowStart: windowStart,
+                processedOffset: readResult.processedOffset,
+                contribution: .tokens(contribution)
             )
+            return contribution
         }
-        store(
-            key: cacheKey,
-            signature: signature,
-            windowStart: windowStart,
-            processedOffset: newOffset,
-            contribution: .tokens(contribution)
-        )
-        return contribution
     }
 
     static func jsonContribution(
         for file: URL,
         windowStart: Date
     ) throws -> TokenFileContribution {
-        let signature = fileSignature(file)
-        let path = file.standardizedFileURL.path
+        let path = UsagePathResolver.canonicalURL(for: file.path).path
         let cacheKey = "json|\(path)"
-        if let cached = lock.withLock({ entries[cacheKey] }),
-           cached.windowStart == windowStart,
-           cached.size == signature.size,
-           cached.modifiedAt == signature.modifiedAt,
-           case let .tokens(value) = cached.contribution {
-            return value
-        }
+        return try withFileLock(for: cacheKey) {
+            let signature = try fileSignature(file)
+            if let cached = lock.withLock({ entries[cacheKey] }),
+               cached.windowStart == windowStart,
+               cached.signature == signature,
+               case let .tokens(value) = cached.contribution {
+                return value
+            }
 
-        let data = try Data(contentsOf: file)
-        let object = try JSONSerialization.jsonObject(with: data)
-        var records: [String: Int] = [:]
-        LocalUsageScanner.collectGenericUsage(
-            from: object,
-            file: file,
-            inheritedDate: nil,
-            windowStart: windowStart,
-            records: &records
-        )
-        let contribution = TokenFileContribution(records: records)
-        store(
-            key: cacheKey,
-            signature: signature,
-            windowStart: windowStart,
-            processedOffset: UInt64(signature.size),
-            contribution: .tokens(contribution)
-        )
-        return contribution
+            let data = try Data(
+                contentsOf: file,
+                options: [.mappedIfSafe, .uncached]
+            )
+            try Task.checkCancellation()
+            let object = try JSONSerialization.jsonObject(with: data)
+            var records: [String: Int] = [:]
+            LocalUsageScanner.collectGenericUsage(
+                from: object,
+                file: file,
+                inheritedDate: nil,
+                windowStart: windowStart,
+                records: &records
+            )
+            let contribution = TokenFileContribution(records: records)
+            try store(
+                key: cacheKey,
+                file: file,
+                windowStart: windowStart,
+                processedOffset: UInt64(signature.size),
+                contribution: .tokens(contribution)
+            )
+            return contribution
+        }
     }
 
-    private static func fileSignature(_ file: URL) -> FileSignature {
-        let attributes = try? FileManager.default.attributesOfItem(
+    private static func fileSignature(_ file: URL) throws -> FileSignature {
+        let canonical = UsagePathResolver.canonicalURL(for: file.path)
+        let attributes = try FileManager.default.attributesOfItem(
             atPath: file.path
         )
         return FileSignature(
-            path: file.standardizedFileURL.path,
-            modifiedAt: attributes?[.modificationDate] as? Date
+            path: canonical.path,
+            modifiedAt: attributes[.modificationDate] as? Date
                 ?? .distantPast,
-            size: (attributes?[.size] as? NSNumber)?.intValue ?? 0
+            size: (attributes[.size] as? NSNumber)?.intValue ?? 0,
+            device: (attributes[.systemNumber] as? NSNumber)?.uint64Value ?? 0,
+            inode: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
         )
     }
 
     private static func store(
         key: String,
-        signature: FileSignature,
+        file: URL,
         windowStart: Date,
         processedOffset: UInt64,
         contribution: FileContribution
-    ) {
+    ) throws {
+        let signature = try fileSignature(file)
+        let headLength = UInt64(min(signature.size, 4_096))
+        let headFingerprint = try fingerprint(
+            file,
+            endingAt: headLength
+        )
+        let boundaryFingerprint = try fingerprint(
+            file,
+            endingAt: processedOffset
+        )
         lock.withLock {
             entries[key] = IncrementalFileEntry(
                 windowStart: windowStart,
-                modifiedAt: signature.modifiedAt,
-                size: signature.size,
+                signature: signature,
                 processedOffset: processedOffset,
+                headLength: headLength,
+                headFingerprint: headFingerprint,
+                boundaryFingerprint: boundaryFingerprint,
                 contribution: contribution
             )
             if entries.count > 500 {
+                let existingEntries = entries.filter {
+                    FileManager.default.fileExists(
+                        atPath: $0.value.signature.path
+                    )
+                }
                 entries = Dictionary(
-                    uniqueKeysWithValues: entries.suffix(400)
+                    uniqueKeysWithValues: existingEntries
+                        .sorted {
+                            $0.value.signature.modifiedAt
+                                > $1.value.signature.modifiedAt
+                        }
+                        .prefix(400)
+                        .map { ($0.key, $0.value) }
                 )
+                fileLocks = fileLocks.filter {
+                    $0.value.users > 0 || entries[$0.key] != nil
+                }
             }
         }
+    }
+
+    private static func canReuse(
+        _ cached: IncrementalFileEntry,
+        for file: URL,
+        signature: FileSignature,
+        windowStart: Date
+    ) throws -> Bool {
+        guard cached.windowStart == windowStart,
+              cached.signature.device == signature.device,
+              cached.signature.inode == signature.inode,
+              cached.signature.size <= signature.size,
+              cached.processedOffset <= UInt64(signature.size)
+        else {
+            return false
+        }
+        let currentHead = try fingerprint(
+            file,
+            endingAt: cached.headLength
+        )
+        guard currentHead == cached.headFingerprint else {
+            return false
+        }
+        if cached.signature.size == signature.size {
+            guard cached.signature.modifiedAt == signature.modifiedAt else {
+                return false
+            }
+        }
+        let currentBoundary = try fingerprint(
+            file,
+            endingAt: cached.processedOffset
+        )
+        return currentBoundary == cached.boundaryFingerprint
+    }
+
+    private static func fingerprint(
+        _ file: URL,
+        endingAt endOffset: UInt64
+    ) throws -> UInt64 {
+        let length = min(endOffset, 4_096)
+        guard length > 0 else { return 14_695_981_039_346_656_037 }
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: endOffset - length)
+        let data = try handle.read(upToCount: Int(length)) ?? Data()
+        return data.reduce(UInt64(14_695_981_039_346_656_037)) {
+            ($0 ^ UInt64($1)) &* 1_099_511_628_211
+        }
+    }
+
+    private static func withFileLock<T>(
+        for key: String,
+        _ body: () throws -> T
+    ) rethrows -> T {
+        let fileLockEntry = lock.withLock {
+            if let existing = fileLocks[key] {
+                existing.users += 1
+                return existing
+            }
+            let created = FileLockEntry()
+            created.users = 1
+            fileLocks[key] = created
+            return created
+        }
+        defer {
+            lock.withLock {
+                fileLockEntry.users -= 1
+                if fileLockEntry.users == 0, entries[key] == nil {
+                    fileLocks.removeValue(forKey: key)
+                }
+            }
+        }
+        return try fileLockEntry.lock.withLock(body)
     }
 }
 

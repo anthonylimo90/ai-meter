@@ -2,8 +2,12 @@ import Darwin
 import Foundation
 
 enum ClaudeUsageProbe {
-    static func fetch(timeout: TimeInterval = 12) -> PlanUsageSnapshot? {
-        guard let executableURL = executableURL() else { return nil }
+    static func fetch(timeout: TimeInterval = 12) -> PlanUsageReadResult {
+        guard let executableURL = executableURL() else {
+            return PlanUsageReadResult(
+                status: .unavailable("Claude Code executable was not found")
+            )
+        }
         let deadline = Date().addingTimeInterval(timeout)
 
         var master: Int32 = -1
@@ -15,7 +19,9 @@ enum ClaudeUsageProbe {
             ws_ypixel: 0
         )
         guard openpty(&master, &slave, nil, nil, &windowSize) == 0 else {
-            return nil
+            return PlanUsageReadResult(
+                status: .failed("Could not open a terminal for Claude Code")
+            )
         }
 
         let terminal = FileHandle(
@@ -38,7 +44,9 @@ enum ClaudeUsageProbe {
         } catch {
             close(master)
             close(slave)
-            return nil
+            return PlanUsageReadResult(
+                status: .failed("Claude Code could not be started")
+            )
         }
         close(slave)
 
@@ -94,6 +102,8 @@ enum ClaudeUsageProbe {
             }
         }
 
+        let reachedDeadline = Date() >= deadline
+        let exitedBeforeTermination = !process.isRunning
         if process.isRunning {
             process.terminate()
             let terminationDeadline = Date().addingTimeInterval(0.5)
@@ -107,11 +117,37 @@ enum ClaudeUsageProbe {
         process.waitUntilExit()
         close(master)
 
-        guard !Task.isCancelled else { return nil }
-        guard let text = String(data: output, encoding: .utf8) else {
-            return nil
+        guard !Task.isCancelled else {
+            return PlanUsageReadResult(
+                status: .failed("Claude quota check was cancelled")
+            )
         }
-        return parse(terminalOutput: text)
+        guard let text = String(data: output, encoding: .utf8) else {
+            return PlanUsageReadResult(
+                status: .failed("Claude Code returned unreadable output")
+            )
+        }
+        if let snapshot = parse(terminalOutput: text) {
+            return .measured(snapshot)
+        }
+        if reachedDeadline {
+            return PlanUsageReadResult(
+                status: .failed("Claude quota check timed out")
+            )
+        }
+        if output.isEmpty {
+            return PlanUsageReadResult(
+                status: .failed("Claude Code returned no usage output")
+            )
+        }
+        if exitedBeforeTermination, process.terminationStatus != 0 {
+            return PlanUsageReadResult(
+                status: .failed("Claude Code exited before reporting usage")
+            )
+        }
+        return PlanUsageReadResult(
+            status: .unavailable("Claude usage output was not recognized")
+        )
     }
 
     static func parse(

@@ -228,6 +228,43 @@ public struct PlanUsageSnapshot: Codable, Equatable, Sendable {
         self.windows = windows
         self.observedAt = observedAt
     }
+
+    public func active(at date: Date = .now) -> PlanUsageSnapshot? {
+        let activeWindows = windows.filter { $0.resetsAt > date }
+        guard !activeWindows.isEmpty else { return nil }
+        return PlanUsageSnapshot(
+            source: source,
+            planName: planName,
+            windows: activeWindows,
+            observedAt: observedAt
+        )
+    }
+}
+
+public enum PlanUsageReadStatus: Equatable, Sendable {
+    case notRequested
+    case measured
+    case unavailable(String)
+    case failed(String)
+}
+
+public struct PlanUsageReadResult: Equatable, Sendable {
+    public let status: PlanUsageReadStatus
+    public let snapshot: PlanUsageSnapshot?
+
+    public init(
+        status: PlanUsageReadStatus,
+        snapshot: PlanUsageSnapshot? = nil
+    ) {
+        self.status = status
+        self.snapshot = snapshot
+    }
+
+    public static func measured(
+        _ snapshot: PlanUsageSnapshot
+    ) -> PlanUsageReadResult {
+        PlanUsageReadResult(status: .measured, snapshot: snapshot)
+    }
 }
 
 public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
@@ -265,7 +302,11 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
     }
 
     public var remainingFraction: Double? {
-        if let primaryWindow = planUsage?.windows.first {
+        remainingFraction(at: .now)
+    }
+
+    public func remainingFraction(at date: Date) -> Double? {
+        if let primaryWindow = planUsage?.active(at: date)?.windows.first {
             return primaryWindow.remainingFraction
         }
         guard tokenLimit > 0 else { return nil }
@@ -273,11 +314,21 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
     }
 
     public var remainingPercent: Int? {
-        remainingFraction.map { Int(($0 * 100).rounded()) }
+        remainingPercent(at: .now)
+    }
+
+    public func remainingPercent(at date: Date) -> Int? {
+        remainingFraction(at: date).map { Int(($0 * 100).rounded()) }
     }
 
     public var isLow: Bool {
-        guard let remainingFraction else { return false }
+        isLow(at: .now)
+    }
+
+    public func isLow(at date: Date) -> Bool {
+        guard let remainingFraction = remainingFraction(at: date) else {
+            return false
+        }
         return remainingFraction <= 0.25
     }
 
@@ -286,18 +337,33 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
     }
 
     public var planUsageSource: PlanUsageSource {
-        if let source = planUsage?.source {
+        planUsageSource(at: .now)
+    }
+
+    public func planUsageSource(at date: Date) -> PlanUsageSource {
+        if let source = planUsage?.active(at: date)?.source {
             return source
         }
         return tokenLimit > 0 ? .configuredBudget : .unavailable
     }
 
     public var primaryPlanWindow: PlanUsageWindow? {
-        planUsage?.windows.first
+        primaryPlanWindow(at: .now)
+    }
+
+    public func primaryPlanWindow(at date: Date) -> PlanUsageWindow? {
+        planUsage?.active(at: date)?.windows.first
     }
 
     public var secondaryPlanWindow: PlanUsageWindow? {
-        guard let windows = planUsage?.windows, windows.count > 1 else {
+        secondaryPlanWindow(at: .now)
+    }
+
+    public func secondaryPlanWindow(at date: Date) -> PlanUsageWindow? {
+        guard
+            let windows = planUsage?.active(at: date)?.windows,
+            windows.count > 1
+        else {
             return nil
         }
         return windows[1]
@@ -310,6 +376,7 @@ public struct ScanResult: Sendable {
     public let availability: UsageAvailability
     public let detail: String
     public let planUsage: PlanUsageSnapshot?
+    public let planUsageStatus: PlanUsageReadStatus
     public let hasWarnings: Bool
 
     public init(
@@ -318,6 +385,7 @@ public struct ScanResult: Sendable {
         availability: UsageAvailability,
         detail: String,
         planUsage: PlanUsageSnapshot? = nil,
+        planUsageStatus: PlanUsageReadStatus = .notRequested,
         hasWarnings: Bool = false
     ) {
         self.provider = provider
@@ -325,6 +393,7 @@ public struct ScanResult: Sendable {
         self.availability = availability
         self.detail = detail
         self.planUsage = planUsage
+        self.planUsageStatus = planUsageStatus
         self.hasWarnings = hasWarnings
     }
 }

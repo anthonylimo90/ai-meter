@@ -1,31 +1,41 @@
+import AppKit
 import SwiftUI
 import AIMeterCore
 
 public struct SettingsView: View {
     let store: UsageStore
+    let snapshotMode: Bool
 
-    public init(store: UsageStore) {
+    public init(
+        store: UsageStore,
+        snapshotMode: Bool = false
+    ) {
         self.store = store
+        self.snapshotMode = snapshotMode
     }
 
     public var body: some View {
-        @Bindable var store = store
+        Group {
+            if snapshotMode {
+                generalSettings
+            } else {
+                TabView {
+                    generalSettings
+                        .tabItem {
+                            Label("General", systemImage: "slider.horizontal.3")
+                        }
 
-        TabView {
-            generalSettings
-                .tabItem {
-                    Label("General", systemImage: "slider.horizontal.3")
-                }
+                    providerSettings
+                        .tabItem {
+                            Label("Providers", systemImage: "square.stack.3d.up")
+                        }
 
-            providerSettings
-                .tabItem {
-                    Label("Providers", systemImage: "square.stack.3d.up")
+                    aboutSettings
+                        .tabItem {
+                            Label("About", systemImage: "info.circle")
+                        }
                 }
-
-            aboutSettings
-                .tabItem {
-                    Label("About", systemImage: "info.circle")
-                }
+            }
         }
         .scenePadding()
         .frame(width: 620, height: 520)
@@ -153,6 +163,9 @@ public struct SettingsView: View {
                         .font(.title.bold())
                     Text("Local AI token usage at a glance")
                         .foregroundStyle(.secondary)
+                    Text(versionText)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
             } icon: {
                 Image(systemName: "gauge.with.dots.needle.50percent")
@@ -217,7 +230,8 @@ public struct SettingsView: View {
                 .secondary
             )
         }
-        if store.readings.contains(where: { $0.availability == .failed }) {
+        if !store.staleProviders.isEmpty
+            || store.readings.contains(where: { $0.availability == .failed }) {
             return (
                 "Needs attention",
                 "exclamationmark.triangle.fill",
@@ -231,6 +245,17 @@ public struct SettingsView: View {
             return ("Waiting for first update", "clock.fill", .secondary)
         }
         return ("Monitoring", "checkmark.circle.fill", .green)
+    }
+
+    private var versionText: String {
+        let version = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? "Development"
+        let build = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleVersion"
+        ) as? String
+        guard let build else { return "Version \(version)" }
+        return "Version \(version) (\(build))"
     }
 }
 
@@ -281,10 +306,18 @@ private struct ProviderConfigurationView: View {
 
                     GridRow {
                         Text("Extra folder")
-                        TextField(
-                            "Optional path containing JSON or JSONL usage records",
-                            text: $configuration.customPath
-                        )
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack {
+                                TextField(
+                                    "Optional JSON, JSONL, log file, or folder",
+                                    text: $configuration.customPath
+                                )
+                                Button("Browse...") {
+                                    chooseUsagePath()
+                                }
+                            }
+                            pathValidationLabel
+                        }
                     }
 
                     GridRow {
@@ -314,5 +347,61 @@ private struct ProviderConfigurationView: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var pathValidationLabel: some View {
+        switch UsagePathResolver.validate(configuration.customPath) {
+        case .empty:
+            Text("Optional. Built-in sources remain active.")
+                .foregroundStyle(.secondary)
+        case let .validFile(path):
+            Label(
+                "Readable \(URL(fileURLWithPath: path).pathExtension.uppercased()) file",
+                systemImage: "checkmark.circle.fill"
+            )
+            .foregroundStyle(.green)
+        case .validDirectory:
+            Label("Readable folder", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        case .relativePath:
+            Label(
+                "Use an absolute path or one beginning with ~.",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .foregroundStyle(.orange)
+        case .missing:
+            Label(
+                "This path does not exist.",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .foregroundStyle(.orange)
+        case .unreadable:
+            Label(
+                "AI Meter cannot read this path.",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .foregroundStyle(.orange)
+        case let .unsupportedFileType(fileExtension):
+            Label(
+                "Unsupported file type: .\(fileExtension)",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .foregroundStyle(.orange)
+        }
+    }
+
+    private func chooseUsagePath() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose AI Usage Records"
+        panel.prompt = "Choose"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.resolvesAliases = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        configuration.customPath = UsagePathResolver
+            .canonicalURL(for: url.path)
+            .path
     }
 }

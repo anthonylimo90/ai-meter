@@ -258,7 +258,7 @@ final class TokenLogParserTests: XCTestCase {
             configuration: configuration,
             rootsOverride: [],
             now: now,
-            claudeUsage: { snapshot }
+            claudeUsage: { .measured(snapshot) }
         )
 
         XCTAssertEqual(result.planUsage, snapshot)
@@ -292,7 +292,7 @@ final class TokenLogParserTests: XCTestCase {
             configuration: configuration,
             rootsOverride: [file],
             now: now,
-            claudeUsage: { nil }
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
         )
 
         XCTAssertEqual(result.tokens, 240)
@@ -329,7 +329,7 @@ final class TokenLogParserTests: XCTestCase {
             configuration: configuration,
             rootsOverride: [file],
             now: now,
-            claudeUsage: { nil }
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
         )
 
         XCTAssertEqual(result.tokens, 125)
@@ -361,7 +361,7 @@ final class TokenLogParserTests: XCTestCase {
             configuration: configuration,
             rootsOverride: [file],
             now: now,
-            claudeUsage: { nil }
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
         )
 
         XCTAssertEqual(result.tokens, 50)
@@ -392,7 +392,7 @@ final class TokenLogParserTests: XCTestCase {
             configuration: configuration,
             rootsOverride: [validFile, invalidFile],
             now: now,
-            claudeUsage: { nil }
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
         )
 
         XCTAssertEqual(result.tokens, 75)
@@ -424,7 +424,7 @@ final class TokenLogParserTests: XCTestCase {
             configuration: configuration,
             rootsOverride: [file],
             now: now,
-            claudeUsage: { nil }
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
         )
         try append(
             try genericRecord(
@@ -438,7 +438,7 @@ final class TokenLogParserTests: XCTestCase {
             configuration: configuration,
             rootsOverride: [file],
             now: now,
-            claudeUsage: { nil }
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
         )
 
         XCTAssertEqual(first.tokens, 40)
@@ -499,10 +499,370 @@ final class TokenLogParserTests: XCTestCase {
             configuration: configuration,
             rootsOverride: [file],
             now: now,
-            claudeUsage: { nil }
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
         )
 
         XCTAssertEqual(result.tokens, 88)
+    }
+
+    func testLargeJSONLFileStillContributesUsage() throws {
+        let now = Date(timeIntervalSince1970: 1_781_100_000)
+        let configuration = configuration(
+            id: .gemini,
+            now: now,
+            windowHours: 2
+        )
+        let file = try temporaryFile(
+            named: "large.jsonl",
+            lines: [
+                try genericRecord(
+                    timestamp: now,
+                    tokens: 125,
+                    id: "large-file-record"
+                )
+            ]
+        )
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.truncate(atOffset: 30_000_000)
+        try handle.close()
+
+        let result = LocalUsageScanner.scan(
+            configuration: configuration,
+            rootsOverride: [file],
+            now: now,
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+        )
+
+        XCTAssertEqual(result.tokens, 125)
+        XCTAssertEqual(result.availability, .measured)
+        XCTAssertTrue(result.hasWarnings)
+    }
+
+    func testOversizedJSONDocumentIsSkippedWithWarning() throws {
+        let now = Date(timeIntervalSince1970: 1_781_100_000)
+        let configuration = configuration(
+            id: .cursor,
+            now: now,
+            windowHours: 2
+        )
+        let file = try temporaryFile(named: "large.json", contents: "{}")
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.truncate(atOffset: 30_000_000)
+        try handle.close()
+
+        let result = LocalUsageScanner.scan(
+            configuration: configuration,
+            rootsOverride: [file],
+            now: now,
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+        )
+
+        XCTAssertEqual(result.tokens, 0)
+        XCTAssertTrue(result.hasWarnings)
+    }
+
+    func testOversizedJSONLRecordIsSkippedAndScanningContinues() throws {
+        let now = Date(timeIntervalSince1970: 1_781_100_000)
+        let configuration = configuration(
+            id: .gemini,
+            now: now,
+            windowHours: 2
+        )
+        let validRecord = try genericRecord(
+            timestamp: now,
+            tokens: 75,
+            id: "after-oversized"
+        )
+        let file = try temporaryFile(
+            named: "oversized-record.jsonl",
+            contents: String(repeating: "x", count: 8_000_001)
+                + "\n"
+                + validRecord
+                + "\n"
+        )
+
+        let result = LocalUsageScanner.scan(
+            configuration: configuration,
+            rootsOverride: [file],
+            now: now,
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+        )
+
+        XCTAssertEqual(result.tokens, 75)
+        XCTAssertTrue(result.hasWarnings)
+    }
+
+    func testSameSizeRewriteReplacesCachedContribution() throws {
+        let now = Date(timeIntervalSince1970: 1_781_100_000)
+        let configuration = configuration(
+            id: .gemini,
+            now: now,
+            windowHours: 2
+        )
+        let original = try genericRecord(
+            timestamp: now,
+            tokens: 40,
+            id: "rewrite"
+        ) + "\n"
+        let replacement = try genericRecord(
+            timestamp: now,
+            tokens: 90,
+            id: "rewrite"
+        ) + "\n"
+        XCTAssertEqual(original.utf8.count, replacement.utf8.count)
+        let file = try temporaryFile(
+            named: "rewrite.jsonl",
+            contents: original
+        )
+
+        let first = LocalUsageScanner.scan(
+            configuration: configuration,
+            rootsOverride: [file],
+            now: now,
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+        )
+        try overwrite(replacement, at: file)
+        let second = LocalUsageScanner.scan(
+            configuration: configuration,
+            rootsOverride: [file],
+            now: now,
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+        )
+
+        XCTAssertEqual(first.tokens, 40)
+        XCTAssertEqual(second.tokens, 90)
+    }
+
+    func testLargerRewriteDoesNotCombineOldAndNewRecords() throws {
+        let now = Date(timeIntervalSince1970: 1_781_100_000)
+        let configuration = configuration(
+            id: .gemini,
+            now: now,
+            windowHours: 2
+        )
+        let file = try temporaryFile(
+            named: "larger-rewrite.jsonl",
+            lines: [
+                try genericRecord(timestamp: now, tokens: 40, id: "old")
+            ]
+        )
+        _ = LocalUsageScanner.scan(
+            configuration: configuration,
+            rootsOverride: [file],
+            now: now,
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+        )
+        try overwrite(
+            try genericRecord(timestamp: now, tokens: 90, id: "new")
+                + "\n{}\n",
+            at: file
+        )
+
+        let result = LocalUsageScanner.scan(
+            configuration: configuration,
+            rootsOverride: [file],
+            now: now,
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+        )
+
+        XCTAssertEqual(result.tokens, 90)
+    }
+
+    func testReplacementAtSamePathInvalidatesCachedContribution() throws {
+        let now = Date(timeIntervalSince1970: 1_781_100_000)
+        let configuration = configuration(
+            id: .gemini,
+            now: now,
+            windowHours: 2
+        )
+        let file = try temporaryFile(
+            named: "replacement.jsonl",
+            lines: [
+                try genericRecord(timestamp: now, tokens: 40, id: "old")
+            ]
+        )
+        _ = LocalUsageScanner.scan(
+            configuration: configuration,
+            rootsOverride: [file],
+            now: now,
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+        )
+        let replacement = file
+            .deletingLastPathComponent()
+            .appendingPathComponent("new.jsonl")
+        try Data(
+            (try genericRecord(timestamp: now, tokens: 95, id: "new") + "\n")
+                .utf8
+        ).write(to: replacement)
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.moveItem(at: replacement, to: file)
+
+        let result = LocalUsageScanner.scan(
+            configuration: configuration,
+            rootsOverride: [file],
+            now: now,
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+        )
+
+        XCTAssertEqual(result.tokens, 95)
+    }
+
+    func testOverlappingRootsDoNotDoubleCountAFile() throws {
+        let now = Date(timeIntervalSince1970: 1_781_100_000)
+        let configuration = configuration(
+            id: .openAI,
+            now: now,
+            windowHours: 2
+        )
+        let file = try temporaryFile(
+            named: "overlap.jsonl",
+            lines: [
+                try codexRecord(timestamp: now, totalTokens: 250)
+            ]
+        )
+
+        let result = LocalUsageScanner.scan(
+            configuration: configuration,
+            rootsOverride: [file.deletingLastPathComponent(), file],
+            now: now,
+            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+        )
+
+        XCTAssertEqual(result.tokens, 250)
+    }
+
+    func testPlanUsageDropsExpiredWindowsOnly() throws {
+        let now = Date(timeIntervalSince1970: 1_781_100_000)
+        let snapshot = PlanUsageSnapshot(
+            source: .providerReported,
+            planName: "Plus",
+            windows: [
+                PlanUsageWindow(
+                    label: "5-hour",
+                    usedPercent: 80,
+                    windowMinutes: 300,
+                    resetsAt: now.addingTimeInterval(-1)
+                ),
+                PlanUsageWindow(
+                    label: "Weekly",
+                    usedPercent: 20,
+                    windowMinutes: 10_080,
+                    resetsAt: now.addingTimeInterval(3_600)
+                )
+            ]
+        )
+
+        let active = try XCTUnwrap(snapshot.active(at: now))
+
+        XCTAssertEqual(active.windows.map(\.label), ["Weekly"])
+    }
+
+    func testUsagePathValidationRejectsRelativeAndUnsupportedFiles() throws {
+        XCTAssertEqual(
+            UsagePathResolver.validate("relative/path"),
+            .relativePath
+        )
+        XCTAssertEqual(
+            UsagePathResolver.validate("~another-user/usage"),
+            .relativePath
+        )
+        let file = try temporaryFile(named: "usage.txt", contents: "tokens")
+        XCTAssertEqual(
+            UsagePathResolver.validate(file.path),
+            .unsupportedFileType("txt")
+        )
+    }
+
+    @MainActor
+    func testDisablingProviderImmediatelyRemovesReading() {
+        let now = Date(timeIntervalSince1970: 1_781_100_000)
+        var configurations = ProviderConfiguration.defaults(now: now)
+        let reading = ProviderUsage(
+            id: .openAI,
+            tier: "Plus",
+            usedTokens: 100,
+            tokenLimit: 0,
+            resetAt: now.addingTimeInterval(3_600),
+            availability: .measured,
+            sourceDetail: "Fixture"
+        )
+        let store = UsageStore(
+            previewReadings: [reading],
+            previewConfigurations: configurations,
+            lastUpdated: now
+        )
+
+        let openAIIndex = configurations.firstIndex {
+            $0.id == .openAI
+        }!
+        configurations[openAIIndex].isEnabled = false
+        store.configurations = configurations
+
+        XCTAssertFalse(store.readings.contains { $0.id == .openAI })
+    }
+
+    @MainActor
+    func testEnablingProviderImmediatelyAddsPlaceholderReading() {
+        let now = Date(timeIntervalSince1970: 1_781_100_000)
+        var configurations = ProviderConfiguration.defaults(now: now)
+        let cursorIndex = configurations.firstIndex {
+            $0.id == .cursor
+        }!
+        configurations[cursorIndex].isEnabled = false
+        let store = UsageStore(
+            previewReadings: [],
+            previewConfigurations: configurations,
+            lastUpdated: now
+        )
+
+        configurations[cursorIndex].isEnabled = true
+        store.configurations = configurations
+
+        let reading = store.readings.first { $0.id == .cursor }
+        XCTAssertEqual(reading?.sourceDetail, "Refresh to scan local records")
+    }
+
+    @MainActor
+    func testFailedClaudeQuotaAttemptClearsPreviousLivePlan() throws {
+        let now = Date()
+        let store = claudeStoreWithLivePlan(now: now)
+        store.merge(
+            ScanResult(
+                provider: .claude,
+                tokens: 120,
+                availability: .measured,
+                detail: "Claude project logs: local tokens",
+                planUsageStatus: .failed("Claude Code timed out")
+            ),
+            preservingClaudeQuota: false
+        )
+
+        let reading = try XCTUnwrap(
+            store.readings.first { $0.id == .claude }
+        )
+        XCTAssertNil(reading.planUsage)
+        XCTAssertTrue(reading.sourceDetail.contains("timed out"))
+    }
+
+    @MainActor
+    func testSkippedClaudeQuotaAttemptPreservesPreviousLivePlan() throws {
+        let now = Date()
+        let store = claudeStoreWithLivePlan(now: now)
+        store.merge(
+            ScanResult(
+                provider: .claude,
+                tokens: 120,
+                availability: .measured,
+                detail: "Claude project logs: local tokens",
+                planUsageStatus: .notRequested
+            ),
+            preservingClaudeQuota: true
+        )
+
+        let reading = try XCTUnwrap(
+            store.readings.first { $0.id == .claude }
+        )
+        XCTAssertNotNil(reading.planUsage?.active(at: now))
     }
 
     private func configuration(
@@ -518,6 +878,38 @@ final class TokenLogParserTests: XCTestCase {
             windowHours: windowHours,
             nextResetAt: now.addingTimeInterval(3_600),
             customPath: ""
+        )
+    }
+
+    @MainActor
+    private func claudeStoreWithLivePlan(now: Date) -> UsageStore {
+        let configurations = ProviderConfiguration.defaults(now: now)
+        let reading = ProviderUsage(
+            id: .claude,
+            tier: "Max",
+            usedTokens: 100,
+            tokenLimit: 0,
+            resetAt: now.addingTimeInterval(3_600),
+            availability: .measured,
+            sourceDetail: "Fixture",
+            planUsage: PlanUsageSnapshot(
+                source: .providerReported,
+                planName: "Max",
+                windows: [
+                    PlanUsageWindow(
+                        label: "5-hour",
+                        usedPercent: 25,
+                        windowMinutes: 300,
+                        resetsAt: now.addingTimeInterval(3_600)
+                    )
+                ],
+                observedAt: now
+            )
+        )
+        return UsageStore(
+            previewReadings: [reading],
+            previewConfigurations: configurations,
+            lastUpdated: now
         )
     }
 
@@ -593,5 +985,18 @@ final class TokenLogParserTests: XCTestCase {
         }
         try handle.seekToEnd()
         try handle.write(contentsOf: Data(contents.utf8))
+    }
+
+    private func overwrite(_ contents: String, at file: URL) throws {
+        let handle = try FileHandle(forWritingTo: file)
+        defer {
+            try? handle.close()
+        }
+        try handle.truncate(atOffset: 0)
+        try handle.write(contentsOf: Data(contents.utf8))
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(1)],
+            ofItemAtPath: file.path
+        )
     }
 }

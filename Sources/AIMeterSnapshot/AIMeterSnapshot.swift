@@ -7,11 +7,27 @@ import AIMeterUI
 @MainActor
 struct AIMeterSnapshot {
     static func main() async throws {
-        let outputPath = CommandLine.arguments.dropFirst().first
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        let outputPath = arguments.first { !$0.hasPrefix("--") }
             ?? "implementation.png"
-        let renderSettings = CommandLine.arguments.contains("--settings")
-        let store = UsageStore()
-        if !renderSettings {
+        let renderSettings = arguments.contains("--settings")
+        let renderLive = arguments.contains("--live")
+        let referenceDate: Date?
+        let store: UsageStore
+        if renderLive {
+            FileHandle.standardError.write(
+                Data(
+                    "Warning: --live reads local usage and may expose personal data.\n"
+                        .utf8
+                )
+            )
+            store = UsageStore()
+            referenceDate = nil
+        } else {
+            store = SnapshotFixtures.store()
+            referenceDate = SnapshotFixtures.referenceDate
+        }
+        if renderLive, !renderSettings {
             await store.refresh(forceClaudeQuota: true)
         }
 
@@ -20,14 +36,25 @@ struct AIMeterSnapshot {
             rootView: AnyView(
                 Group {
                     if renderSettings {
-                        SettingsView(store: store)
+                        SettingsView(
+                            store: store,
+                            snapshotMode: true
+                        )
+                            .background(Color(nsColor: .windowBackgroundColor))
+                            .environment(\.colorScheme, .light)
                     } else {
-                        MeterPopover(store: store)
+                        MeterPopover(
+                            store: store,
+                            referenceDate: referenceDate
+                        )
                             .environment(\.colorScheme, .dark)
                     }
                 }
             )
         )
+        if renderSettings {
+            hostingView.appearance = NSAppearance(named: .aqua)
+        }
         let logicalSize = hostingView.fittingSize
         hostingView.frame = NSRect(origin: .zero, size: logicalSize)
         let window = NSWindow(
@@ -37,6 +64,10 @@ struct AIMeterSnapshot {
             defer: false
         )
         window.contentView = hostingView
+        if renderSettings {
+            window.appearance = NSAppearance(named: .aqua)
+            window.backgroundColor = .windowBackgroundColor
+        }
         hostingView.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
         try await Task.sleep(for: .milliseconds(150))
