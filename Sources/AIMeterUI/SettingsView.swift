@@ -321,6 +321,60 @@ private struct ProviderConfigurationView: View {
                     }
 
                     GridRow {
+                        Text("Cost estimates")
+                        Toggle(
+                            "Estimate token cost",
+                            isOn: $configuration.costTrackingEnabled
+                        )
+                    }
+
+                    if configuration.costTrackingEnabled {
+                        GridRow {
+                            Text("Default model")
+                            TextField(
+                                "Model used when records omit one",
+                                text: $configuration.defaultModelName
+                            )
+                        }
+
+                        GridRow {
+                            Text("USD / 1M")
+                            VStack(alignment: .leading, spacing: 8) {
+                                RateField(
+                                    title: "Input",
+                                    value: costRate.inputPerMillion
+                                )
+                                RateField(
+                                    title: "Output",
+                                    value: costRate.outputPerMillion
+                                )
+                                RateField(
+                                    title: "Cached input",
+                                    value: costRate.cachedInputPerMillion
+                                )
+                                RateField(
+                                    title: "Cache write",
+                                    value: costRate.cacheWritePerMillion
+                                )
+                                RateField(
+                                    title: "Cache read",
+                                    value: costRate.cacheReadPerMillion
+                                )
+                            }
+                        }
+
+                        GridRow {
+                            Text("")
+                            Label(
+                                "Costs are estimates from local records, not provider billing statements.",
+                                systemImage: "info.circle"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    GridRow {
                         Text("Built-in source")
                         Text(configuration.id.builtInPaths.joined(separator: ", "))
                             .font(.caption.monospaced())
@@ -345,6 +399,31 @@ private struct ProviderConfigurationView: View {
                     Toggle("Enabled", isOn: $configuration.isEnabled)
                         .labelsHidden()
                 }
+            }
+        }
+    }
+
+    private var costRate: Binding<TokenCostRate> {
+        Binding {
+            configuration.customRates.first ?? TokenCostRate(
+                id: "\(configuration.id.rawValue)-default",
+                provider: configuration.id,
+                modelName: configuration.defaultModelName,
+                updatedAt: .now,
+                sourceNote: "User configured"
+            )
+        } set: { newValue in
+            var rate = newValue
+            rate.provider = configuration.id
+            rate.modelName = configuration.defaultModelName
+            rate.currencyCode = "USD"
+            rate.isEnabled = true
+            rate.updatedAt = .now
+            rate.sourceNote = "User configured"
+            if configuration.customRates.isEmpty {
+                configuration.customRates = [rate]
+            } else {
+                configuration.customRates[0] = rate
             }
         }
     }
@@ -403,5 +482,24 @@ private struct ProviderConfigurationView: View {
         configuration.customPath = UsagePathResolver
             .canonicalURL(for: url.path)
             .path
+    }
+}
+
+private struct RateField: View {
+    let title: String
+    @Binding var value: Decimal
+
+    var body: some View {
+        HStack {
+            Text(title)
+                .frame(width: 92, alignment: .leading)
+                .foregroundStyle(.secondary)
+            TextField(
+                "0.00",
+                value: $value,
+                format: .number.precision(.fractionLength(0...6))
+            )
+            .frame(width: 100)
+        }
     }
 }

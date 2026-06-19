@@ -228,13 +228,13 @@ public enum LocalUsageScanner {
             }
 
             for case let fileURL as URL in enumerator {
-                let canonical = UsagePathResolver.canonicalURL(for: fileURL.path)
-                let pathExtension = canonical.pathExtension.lowercased()
+                let pathExtension = fileURL.pathExtension.lowercased()
                 guard UsagePathResolver.supportedExtensions.contains(
                     pathExtension
                 ) else {
                     continue
                 }
+                let canonical = UsagePathResolver.canonicalURL(for: fileURL.path)
                 let values = try? canonical.resourceValues(forKeys: Set(keys))
                 guard values?.isRegularFile == true else { continue }
                 if pathExtension == "json",
@@ -263,7 +263,7 @@ public enum LocalUsageScanner {
     ) -> ScanResult {
         let planUsage = planReadResult.snapshot
         let availability: UsageAvailability
-        if tokenScan.tokens > 0 {
+        if tokenScan.breakdown.totalTokens > 0 {
             availability = .measured
         } else if tokenScan.failedFiles > 0 && tokenScan.readableFiles == 0 {
             availability = .failed
@@ -272,11 +272,11 @@ public enum LocalUsageScanner {
         }
 
         var detail: String
-        if planUsage != nil && tokenScan.tokens > 0 {
+        if planUsage != nil && tokenScan.breakdown.totalTokens > 0 {
             detail = "\(configuration.id.sourceLabel): provider-reported plan limits and local tokens"
         } else if planUsage != nil {
             detail = "Provider-reported plan limits detected; no recent local token data"
-        } else if tokenScan.tokens > 0 {
+        } else if tokenScan.breakdown.totalTokens > 0 {
             detail = "\(configuration.id.sourceLabel): local tokens; plan usage is not exposed"
         } else if !hasRoots {
             detail = "No local data folder is available"
@@ -299,12 +299,13 @@ public enum LocalUsageScanner {
 
         return ScanResult(
             provider: configuration.id,
-            tokens: tokenScan.tokens,
+            tokenBreakdown: tokenScan.breakdown,
             availability: availability,
             detail: detail,
             planUsage: planUsage,
             planUsageStatus: planReadResult.status,
-            hasWarnings: tokenScan.failedFiles > 0 || tokenScan.warningCount > 0
+            hasWarnings: tokenScan.failedFiles > 0 || tokenScan.warningCount > 0,
+            modelName: tokenScan.modelName
         )
     }
 
@@ -313,8 +314,9 @@ public enum LocalUsageScanner {
         after windowStart: Date,
         inventoryWarnings: Int
     ) -> CodexScan {
-        var total = 0
+        var totalBreakdown = TokenBreakdown.zero
         var newestPlanUsage: (date: Date, snapshot: PlanUsageSnapshot)?
+        var newestModel: (date: Date, modelName: String)?
         var readableFiles = 0
         var failedFiles = 0
         var warningCount = inventoryWarnings
@@ -336,21 +338,23 @@ public enum LocalUsageScanner {
                 }
                 readableFiles += 1
                 warningCount += contribution.warningCount
-                total += max(
-                    contribution.sessionMaximum - contribution.baseline,
-                    0
-                )
+                totalBreakdown += contribution.windowBreakdown
+                if let model = contribution.newestModel,
+                   newestModel == nil || model.date > newestModel!.date {
+                    newestModel = model
+                }
             } catch {
                 failedFiles += 1
             }
         }
 
         let tokenScan = TokenScan(
-            tokens: total,
+            breakdown: totalBreakdown,
             candidateFiles: candidateFiles.count,
             readableFiles: readableFiles,
             failedFiles: failedFiles,
-            warningCount: warningCount
+            warningCount: warningCount,
+            modelName: newestModel?.modelName
         )
         guard let latest = newestPlanUsage?.snapshot else {
             return CodexScan(tokenScan: tokenScan, planUsage: nil)
@@ -366,7 +370,8 @@ public enum LocalUsageScanner {
         after windowStart: Date,
         inventoryWarnings: Int
     ) -> TokenScan {
-        var messageTotals: [String: Int] = [:]
+        var messageTotals: [String: TokenBreakdown] = [:]
+        var modelCounts: [String: Int] = [:]
         var readableFiles = 0
         var failedFiles = 0
         var warningCount = inventoryWarnings
@@ -382,8 +387,14 @@ public enum LocalUsageScanner {
                     provider: .claude,
                     windowStart: windowStart
                 )
-                for (key, tokens) in contribution.records {
-                    messageTotals[key] = max(messageTotals[key] ?? 0, tokens)
+                for (key, record) in contribution.records {
+                    messageTotals[key] = preferredBreakdown(
+                        current: messageTotals[key],
+                        candidate: record.breakdown
+                    )
+                    if let modelName = record.modelName {
+                        modelCounts[modelName, default: 0] += 1
+                    }
                 }
                 readableFiles += 1
                 warningCount += contribution.warningCount
@@ -393,11 +404,12 @@ public enum LocalUsageScanner {
         }
 
         return TokenScan(
-            tokens: messageTotals.values.reduce(0, +),
+            breakdown: messageTotals.values.reduce(.zero, +),
             candidateFiles: candidateFiles.count,
             readableFiles: readableFiles,
             failedFiles: failedFiles,
-            warningCount: warningCount
+            warningCount: warningCount,
+            modelName: mostCommonModel(in: modelCounts)
         )
     }
 
@@ -407,7 +419,8 @@ public enum LocalUsageScanner {
         after windowStart: Date,
         inventoryWarnings: Int
     ) -> TokenScan {
-        var records: [String: Int] = [:]
+        var records: [String: TokenBreakdown] = [:]
+        var modelCounts: [String: Int] = [:]
         var readableFiles = 0
         var failedFiles = 0
         var warningCount = inventoryWarnings
@@ -422,8 +435,14 @@ public enum LocalUsageScanner {
                         provider: provider,
                         windowStart: windowStart
                     )
-                    for (key, tokens) in contribution.records {
-                        records[key] = max(records[key] ?? 0, tokens)
+                    for (key, record) in contribution.records {
+                        records[key] = preferredBreakdown(
+                            current: records[key],
+                            candidate: record.breakdown
+                        )
+                        if let modelName = record.modelName {
+                            modelCounts[modelName, default: 0] += 1
+                        }
                     }
                     warningCount += contribution.warningCount
                 } else if pathExtension == "json" {
@@ -431,8 +450,14 @@ public enum LocalUsageScanner {
                         for: file,
                         windowStart: windowStart
                     )
-                    for (key, tokens) in contribution.records {
-                        records[key] = max(records[key] ?? 0, tokens)
+                    for (key, record) in contribution.records {
+                        records[key] = preferredBreakdown(
+                            current: records[key],
+                            candidate: record.breakdown
+                        )
+                        if let modelName = record.modelName {
+                            modelCounts[modelName, default: 0] += 1
+                        }
                     }
                 }
                 readableFiles += 1
@@ -442,11 +467,12 @@ public enum LocalUsageScanner {
         }
 
         return TokenScan(
-            tokens: records.values.reduce(0, +),
+            breakdown: records.values.reduce(.zero, +),
             candidateFiles: files.count,
             readableFiles: readableFiles,
             failedFiles: failedFiles,
-            warningCount: warningCount
+            warningCount: warningCount,
+            modelName: mostCommonModel(in: modelCounts)
         )
     }
 
@@ -455,7 +481,7 @@ public enum LocalUsageScanner {
         file: URL,
         inheritedDate: Date?,
         windowStart: Date,
-        records: inout [String: Int]
+        records: inout [String: TokenUsageRecord]
     ) {
         if let dictionary = object as? [String: Any] {
             let date = recordDate(in: dictionary) ?? inheritedDate
@@ -463,7 +489,13 @@ public enum LocalUsageScanner {
                date >= windowStart,
                let usage = TokenLogParser.genericUsage(in: dictionary) {
                 let key = usage.identifier ?? "\(file.path):\(records.count)"
-                records[key] = max(records[key] ?? 0, usage.tokens)
+                records[key] = preferredRecord(
+                    current: records[key],
+                    candidate: TokenUsageRecord(
+                        breakdown: usage.breakdown,
+                        modelName: usage.modelName
+                    )
+                )
             }
 
             for value in dictionary.values {
@@ -594,12 +626,53 @@ public enum LocalUsageScanner {
     }
 }
 
+private func preferredBreakdown(
+    current: TokenBreakdown?,
+    candidate: TokenBreakdown
+) -> TokenBreakdown {
+    guard let current else { return candidate }
+    if candidate.totalTokens > current.totalTokens {
+        return candidate
+    }
+    if candidate.totalTokens == current.totalTokens,
+       candidate.splitTokenCount > current.splitTokenCount {
+        return candidate
+    }
+    return current
+}
+
+private func preferredRecord(
+    current: TokenUsageRecord?,
+    candidate: TokenUsageRecord
+) -> TokenUsageRecord {
+    guard let current else { return candidate }
+    let breakdown = preferredBreakdown(
+        current: current.breakdown,
+        candidate: candidate.breakdown
+    )
+    let modelName = candidate.modelName ?? current.modelName
+    return TokenUsageRecord(breakdown: breakdown, modelName: modelName)
+}
+
+private func mostCommonModel(in counts: [String: Int]) -> String? {
+    counts
+        .sorted {
+            if $0.value == $1.value {
+                return $0.key < $1.key
+            }
+            return $0.value > $1.value
+        }
+        .first?
+        .key
+}
+
 private struct TokenScan: Sendable {
-    let tokens: Int
+    let breakdown: TokenBreakdown
     let candidateFiles: Int
     let readableFiles: Int
     let failedFiles: Int
     let warningCount: Int
+    let modelName: String?
 }
 
 private struct UsageFileInventory: Sendable {
@@ -645,9 +718,10 @@ private enum DirectoryInventoryCache {
         modifiedAfter windowStart: Date
     ) throws -> UsageFileInventory {
         ensureWatchers(for: roots)
+        let normalizedWindowStart = windowStart.roundedDownToMinute
         let key = InventoryCacheKey(
             roots: roots.map(\.standardizedFileURL.path).sorted(),
-            windowStart: windowStart
+            windowStart: normalizedWindowStart
         )
         if let cached = lock.withLock({ entries[key] }),
            Date().timeIntervalSince(cached.createdAt) < 5 {
@@ -663,8 +737,9 @@ private enum DirectoryInventoryCache {
                 inventory: inventory
             )
             if entries.count > 20 {
+                let now = Date()
                 entries = entries.filter {
-                    Date().timeIntervalSince($0.value.createdAt) < 30
+                    now.timeIntervalSince($0.value.createdAt) < 30
                 }
             }
         }
@@ -672,6 +747,7 @@ private enum DirectoryInventoryCache {
     }
 
     private static func ensureWatchers(for roots: [URL]) {
+        cleanupWatchers()
         for root in roots {
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(
@@ -709,25 +785,71 @@ private enum DirectoryInventoryCache {
         }
     }
 
+    private static func cleanupWatchers() {
+        lock.withLock {
+            let missingPaths = watchers.keys.filter {
+                !FileManager.default.fileExists(atPath: $0)
+            }
+            for path in missingPaths {
+                watchers[path]?.cancel()
+                watchers.removeValue(forKey: path)
+                entries = entries.filter { !$0.key.roots.contains(path) }
+            }
+            if watchers.count > 50 {
+                let activeRoots = Set(entries.flatMap(\.key.roots))
+                let inactivePaths = watchers.keys.filter {
+                    !activeRoots.contains($0)
+                }
+                for path in inactivePaths {
+                    watchers[path]?.cancel()
+                    watchers.removeValue(forKey: path)
+                }
+            }
+        }
+    }
+
     nonisolated(unsafe)
     private static var watchers: [
         String: DispatchSourceFileSystemObject
     ] = [:]
 }
 
+private extension Date {
+    var roundedDownToMinute: Date {
+        Date(timeIntervalSince1970: floor(timeIntervalSince1970 / 60) * 60)
+    }
+}
+
 private struct CodexFileContribution: Sendable {
     var baseline = 0
-    var sessionMaximum = 0
+    var sessionMaximum = TokenBreakdown.zero
     var newestPlanUsage: (
         date: Date,
         snapshot: PlanUsageSnapshot
     )?
+    var newestModel: (
+        date: Date,
+        modelName: String
+    )?
     var warningCount = 0
+
+    var windowBreakdown: TokenBreakdown {
+        let total = max(sessionMaximum.totalTokens - baseline, 0)
+        if baseline == 0, sessionMaximum.hasDetailedSplit {
+            return sessionMaximum
+        }
+        return .aggregate(total)
+    }
 }
 
 private struct TokenFileContribution: Sendable {
-    var records: [String: Int] = [:]
+    var records: [String: TokenUsageRecord] = [:]
     var warningCount = 0
+}
+
+private struct TokenUsageRecord: Sendable {
+    var breakdown: TokenBreakdown
+    var modelName: String?
 }
 
 private enum FileContribution: Sendable {
@@ -794,15 +916,30 @@ private enum IncrementalFileCache {
                 guard let date = LocalUsageScanner.recordDate(in: object) else {
                     return
                 }
-                if let total = TokenLogParser.codexSessionTotal(in: object) {
+                if let breakdown = TokenLogParser.codexSessionBreakdown(
+                    in: object
+                ) {
                     if date < windowStart {
-                        contribution.baseline = max(contribution.baseline, total)
-                    } else {
-                        contribution.sessionMaximum = max(
-                            contribution.sessionMaximum,
-                            total
+                        contribution.baseline = max(
+                            contribution.baseline,
+                            breakdown.totalTokens
                         )
+                    } else if breakdown.totalTokens
+                        > contribution.sessionMaximum.totalTokens
+                        || (
+                            breakdown.totalTokens
+                                == contribution.sessionMaximum.totalTokens
+                            && breakdown.splitTokenCount
+                                > contribution.sessionMaximum.splitTokenCount
+                        ) {
+                        contribution.sessionMaximum = breakdown
                     }
+                }
+                if date >= windowStart,
+                   let modelName = TokenLogParser.modelName(in: object),
+                   contribution.newestModel == nil
+                    || date > contribution.newestModel!.date {
+                    contribution.newestModel = (date, modelName)
                 }
                 if date >= windowStart,
                    let snapshot = TokenLogParser.codexPlanUsage(in: object),
@@ -876,9 +1013,12 @@ private enum IncrementalFileCache {
                 guard let usage else { return }
                 let key = usage.identifier
                     ?? "\(path):\(contribution.records.count)"
-                contribution.records[key] = max(
-                    contribution.records[key] ?? 0,
-                    usage.tokens
+                contribution.records[key] = preferredRecord(
+                    current: contribution.records[key],
+                    candidate: TokenUsageRecord(
+                        breakdown: usage.breakdown,
+                        modelName: usage.modelName
+                    )
                 )
             }
             contribution.warningCount += readResult.skippedOversizedRecords
@@ -914,7 +1054,7 @@ private enum IncrementalFileCache {
             )
             try Task.checkCancellation()
             let object = try JSONSerialization.jsonObject(with: data)
-            var records: [String: Int] = [:]
+            var records: [String: TokenUsageRecord] = [:]
             LocalUsageScanner.collectGenericUsage(
                 from: object,
                 file: file,
@@ -1074,11 +1214,36 @@ private enum IncrementalFileCache {
 
 struct ParsedTokenUsage: Equatable, Sendable {
     let identifier: String?
-    let tokens: Int
+    let breakdown: TokenBreakdown
+    let modelName: String?
+
+    init(
+        identifier: String?,
+        breakdown: TokenBreakdown,
+        modelName: String? = nil
+    ) {
+        self.identifier = identifier
+        self.breakdown = breakdown
+        self.modelName = modelName
+    }
+
+    init(identifier: String?, tokens: Int) {
+        self.identifier = identifier
+        self.breakdown = .aggregate(tokens)
+        self.modelName = nil
+    }
+
+    var tokens: Int {
+        breakdown.totalTokens
+    }
 }
 
 enum TokenLogParser {
     static func codexSessionTotal(in object: [String: Any]) -> Int? {
+        codexSessionBreakdown(in: object)?.totalTokens
+    }
+
+    static func codexSessionBreakdown(in object: [String: Any]) -> TokenBreakdown? {
         guard
             let payload = object["payload"] as? [String: Any],
             payload["type"] as? String == "token_count",
@@ -1087,7 +1252,13 @@ enum TokenLogParser {
         else {
             return nil
         }
-        return integer(in: totalUsage, keys: ["total_tokens"])
+        let explicitTotal = integer(in: totalUsage, keys: ["total_tokens"])
+        let breakdown = tokenBreakdown(in: totalUsage)
+        if breakdown.totalTokens > 0 {
+            return breakdown
+        }
+        guard let explicitTotal else { return nil }
+        return .aggregate(explicitTotal)
     }
 
     static func codexPlanUsage(
@@ -1134,21 +1305,26 @@ enum TokenLogParser {
             return nil
         }
 
-        let total = sum(
-            in: usage,
-            keys: [
-                "input_tokens",
-                "output_tokens",
-                "cache_creation_input_tokens",
-                "cache_read_input_tokens"
-            ]
+        let breakdown = TokenBreakdown(
+            inputTokens: sum(in: usage, keys: ["input_tokens"]),
+            outputTokens: sum(in: usage, keys: ["output_tokens"]),
+            cacheWriteTokens: sum(
+                in: usage,
+                keys: ["cache_creation_input_tokens"]
+            ),
+            cacheReadTokens: sum(in: usage, keys: ["cache_read_input_tokens"])
         )
-        guard total > 0 else { return nil }
+        guard breakdown.totalTokens > 0 else { return nil }
 
         let identifier = message["id"] as? String
             ?? object["requestId"] as? String
             ?? object["uuid"] as? String
-        return ParsedTokenUsage(identifier: identifier, tokens: total)
+        return ParsedTokenUsage(
+            identifier: identifier,
+            breakdown: breakdown,
+            modelName: modelName(in: object)
+                ?? string(in: message, keys: modelNameKeys)
+        )
     }
 
     static func genericUsage(in object: [String: Any]) -> ParsedTokenUsage? {
@@ -1169,30 +1345,99 @@ enum TokenLogParser {
                     "total_token_count"
                 ]
             )
-            let total = explicitTotal ?? sum(
-                in: usage,
-                keys: [
-                    "input_tokens",
-                    "output_tokens",
-                    "prompt_tokens",
-                    "completion_tokens",
-                    "inputTokenCount",
-                    "outputTokenCount",
-                    "promptTokenCount",
-                    "candidatesTokenCount",
-                    "cachedContentTokenCount"
-                ]
-            )
-            guard total > 0 else { continue }
+            var breakdown = tokenBreakdown(in: usage)
+            if breakdown.totalTokens == 0, let explicitTotal {
+                breakdown = .aggregate(explicitTotal)
+            } else if let explicitTotal,
+                      explicitTotal > breakdown.totalTokens {
+                breakdown.otherTokens += explicitTotal - breakdown.totalTokens
+            }
+            guard breakdown.totalTokens > 0 else { continue }
 
             let identifier = object["id"] as? String
                 ?? object["uuid"] as? String
                 ?? object["requestId"] as? String
                 ?? object["request_id"] as? String
-            return ParsedTokenUsage(identifier: identifier, tokens: total)
+            return ParsedTokenUsage(
+                identifier: identifier,
+                breakdown: breakdown,
+                modelName: modelName(in: object)
+                    ?? string(in: usage, keys: modelNameKeys)
+            )
         }
 
         return nil
+    }
+
+    static func modelName(in object: [String: Any]) -> String? {
+        if let direct = string(in: object, keys: modelNameKeys) {
+            return direct
+        }
+        let nestedKeys = ["payload", "message", "request", "metadata", "info"]
+        for key in nestedKeys {
+            if let nested = object[key] as? [String: Any],
+               let model = modelName(in: nested) {
+                return model
+            }
+        }
+        return nil
+    }
+
+    private static let modelNameKeys = [
+        "model",
+        "modelName",
+        "model_name",
+        "model_id",
+        "modelSlug",
+        "model_slug",
+        "engine"
+    ]
+
+    private static func tokenBreakdown(
+        in usage: [String: Any]
+    ) -> TokenBreakdown {
+        TokenBreakdown(
+            inputTokens: sum(
+                in: usage,
+                keys: [
+                    "input_tokens",
+                    "prompt_tokens",
+                    "inputTokenCount",
+                    "promptTokenCount"
+                ]
+            ),
+            outputTokens: sum(
+                in: usage,
+                keys: [
+                    "output_tokens",
+                    "completion_tokens",
+                    "outputTokenCount",
+                    "candidatesTokenCount"
+                ]
+            ),
+            cachedInputTokens: sum(
+                in: usage,
+                keys: [
+                    "cached_input_tokens",
+                    "cachedInputTokens",
+                    "cachedContentTokenCount"
+                ]
+            ),
+            cacheWriteTokens: sum(
+                in: usage,
+                keys: [
+                    "cache_creation_input_tokens",
+                    "cacheWriteTokens"
+                ]
+            ),
+            cacheReadTokens: sum(
+                in: usage,
+                keys: [
+                    "cache_read_input_tokens",
+                    "cacheReadTokens"
+                ]
+            )
+        )
     }
 
     private static func sum(in dictionary: [String: Any], keys: [String]) -> Int {
@@ -1214,6 +1459,19 @@ enum TokenLogParser {
             }
             if let value = dictionary[key] as? String, let number = Int(value) {
                 return number
+            }
+        }
+        return nil
+    }
+
+    private static func string(
+        in dictionary: [String: Any],
+        keys: [String]
+    ) -> String? {
+        for key in keys {
+            if let value = dictionary[key] as? String,
+               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return value
             }
         }
         return nil

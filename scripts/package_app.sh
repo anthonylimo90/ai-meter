@@ -17,6 +17,7 @@ APP_BUILD="${APP_BUILD_OVERRIDE:-$APP_BUILD}"
 APP_SIGN_IDENTITY="${APP_SIGN_IDENTITY:--}"
 ARCHS="${ARCHS:-}"
 OUTPUT_APP="${OUTPUT_APP:-$ROOT_DIR/dist/AI Meter.app}"
+SWIFT_BUILD_SCRATCH_PATH="${SWIFT_BUILD_SCRATCH_PATH:-}"
 
 BUILD_ARGS=(
     -c release
@@ -28,6 +29,9 @@ if [[ -n "$ARCHS" ]]; then
     for arch in ${=ARCHS}; do
         BUILD_ARGS+=(--arch "$arch")
     done
+fi
+if [[ -n "$SWIFT_BUILD_SCRATCH_PATH" ]]; then
+    BUILD_ARGS+=(--scratch-path "$SWIFT_BUILD_SCRATCH_PATH")
 fi
 
 swift build "${BUILD_ARGS[@]}"
@@ -94,6 +98,9 @@ mkdir -p "$(dirname "$OUTPUT_APP")"
 rm -rf "$OUTPUT_APP"
 ditto --norsrc --noextattr --noqtn --noacl "$APP_DIR" "$OUTPUT_APP"
 xattr -cr "$OUTPUT_APP" 2>/dev/null || true
+xattr -dr com.apple.provenance "$OUTPUT_APP" 2>/dev/null || true
+xattr -dr com.apple.FinderInfo "$OUTPUT_APP" 2>/dev/null || true
+xattr -dr 'com.apple.fileprovider.fpfs#P' "$OUTPUT_APP" 2>/dev/null || true
 
 if [[ "$APP_SIGN_IDENTITY" == "-" ]]; then
     codesign --force --deep --sign - "$OUTPUT_APP"

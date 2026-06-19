@@ -5,11 +5,11 @@ import AIMeterCore
 @MainActor
 @Observable
 public final class UsageStore {
-    private static let settingsKey = "provider-configurations-v3"
+    private static let settingsKey = "provider-configurations-v4"
     private static let autoRefreshKey = "auto-refresh-enabled"
     private static let refreshIntervalKey = "refresh-interval-seconds"
     private static let showMenuBarMetersKey = "show-menu-bar-meters"
-    private static let readingsKey = "last-provider-readings-v1"
+    private static let readingsKey = "last-provider-readings-v2"
     private static let lastUpdatedKey = "last-provider-update"
     private static let lastClaudeQuotaAttemptKey =
         "last-claude-quota-attempt"
@@ -93,13 +93,19 @@ public final class UsageStore {
                 return ProviderUsage(
                     id: stored.id,
                     tier: activePlanUsage?.planName ?? configuration.tier,
-                    usedTokens: stored.usedTokens,
+                    tokenBreakdown: stored.tokenBreakdown,
                     tokenLimit: max(configuration.tokenLimit, 0),
                     resetAt: activePlanUsage?.windows.first?.resetsAt
                         ?? configuration.nextResetAt,
                     availability: stored.availability,
                     sourceDetail: stored.sourceDetail,
-                    planUsage: activePlanUsage
+                    planUsage: activePlanUsage,
+                    modelName: stored.modelName,
+                    costEstimate: Self.costEstimate(
+                        for: stored.tokenBreakdown,
+                        modelName: stored.modelName,
+                        configuration: configuration
+                    )
                 )
             }
             return ProviderUsage(
@@ -364,7 +370,7 @@ public final class UsageStore {
             let staleReading = ProviderUsage(
                 id: previous.id,
                 tier: planUsage?.planName ?? configuration.tier,
-                usedTokens: previous.usedTokens,
+                tokenBreakdown: previous.tokenBreakdown,
                 tokenLimit: max(configuration.tokenLimit, 0),
                 resetAt: planUsage?.windows.first?.resetsAt
                     ?? configuration.nextResetAt,
@@ -373,7 +379,13 @@ public final class UsageStore {
                     for: result,
                     suffix: "showing last known local token value"
                 ),
-                planUsage: planUsage
+                planUsage: planUsage,
+                modelName: previous.modelName,
+                costEstimate: Self.costEstimate(
+                    for: previous.tokenBreakdown,
+                    modelName: previous.modelName,
+                    configuration: configuration
+                )
             )
             if let index = readings.firstIndex(where: {
                 $0.id == result.provider
@@ -392,13 +404,25 @@ public final class UsageStore {
         let reading = ProviderUsage(
             id: configuration.id,
             tier: planUsage?.planName ?? configuration.tier,
-            usedTokens: result.tokens,
+            tokenBreakdown: result.tokenBreakdown,
             tokenLimit: max(configuration.tokenLimit, 0),
             resetAt: planUsage?.windows.first?.resetsAt
                 ?? configuration.nextResetAt,
             availability: result.availability,
             sourceDetail: sourceDetail(for: result),
-            planUsage: planUsage
+            planUsage: planUsage,
+            modelName: Self.resolvedModelName(
+                scannedModelName: result.modelName,
+                configuration: configuration
+            ),
+            costEstimate: Self.costEstimate(
+                for: result.tokenBreakdown,
+                modelName: Self.resolvedModelName(
+                    scannedModelName: result.modelName,
+                    configuration: configuration
+                ),
+                configuration: configuration
+            )
         )
         if let index = readings.firstIndex(where: { $0.id == result.provider }) {
             readings[index] = reading
@@ -469,13 +493,19 @@ public final class UsageStore {
             return ProviderUsage(
                 id: previous.id,
                 tier: activePlanUsage?.planName ?? configuration.tier,
-                usedTokens: previous.usedTokens,
+                tokenBreakdown: previous.tokenBreakdown,
                 tokenLimit: max(configuration.tokenLimit, 0),
                 resetAt: activePlanUsage?.windows.first?.resetsAt
                     ?? configuration.nextResetAt,
                 availability: previous.availability,
                 sourceDetail: previous.sourceDetail,
-                planUsage: activePlanUsage
+                planUsage: activePlanUsage,
+                modelName: previous.modelName,
+                costEstimate: Self.costEstimate(
+                    for: previous.tokenBreakdown,
+                    modelName: previous.modelName,
+                    configuration: configuration
+                )
             )
         }
         refreshingProviders.formIntersection(enabledIDs)
@@ -522,12 +552,14 @@ public final class UsageStore {
             return ProviderUsage(
                 id: reading.id,
                 tier: planUsage?.planName ?? reading.tier,
-                usedTokens: reading.usedTokens,
+                tokenBreakdown: reading.tokenBreakdown,
                 tokenLimit: reading.tokenLimit,
                 resetAt: planUsage?.windows.first?.resetsAt ?? reading.resetAt,
                 availability: reading.availability,
                 sourceDetail: reading.sourceDetail,
-                planUsage: planUsage
+                planUsage: planUsage,
+                modelName: reading.modelName,
+                costEstimate: reading.costEstimate
             )
         }
         guard let data = try? JSONEncoder().encode(sanitized) else { return }
@@ -559,6 +591,53 @@ public final class UsageStore {
             return ProviderConfiguration.defaults()
         }
         return configurations
+    }
+
+    private static func resolvedModelName(
+        scannedModelName: String?,
+        configuration: ProviderConfiguration
+    ) -> String? {
+        let configured = configuration.defaultModelName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let scannedModelName,
+           !scannedModelName.trimmingCharacters(
+                in: .whitespacesAndNewlines
+           ).isEmpty {
+            return scannedModelName
+        }
+        return configured.isEmpty ? nil : configured
+    }
+
+    private static func costEstimate(
+        for breakdown: TokenBreakdown,
+        modelName: String?,
+        configuration: ProviderConfiguration
+    ) -> TokenCostEstimate? {
+        guard configuration.costTrackingEnabled else { return nil }
+        let rate = rate(for: modelName, configuration: configuration)
+        return TokenCostEstimator.estimate(
+            breakdown: breakdown,
+            rate: rate,
+            modelName: modelName
+        )
+    }
+
+    private static func rate(
+        for modelName: String?,
+        configuration: ProviderConfiguration
+    ) -> TokenCostRate? {
+        let enabledRates = configuration.customRates.filter {
+            $0.isEnabled && $0.provider == configuration.id
+        }
+        if let modelName {
+            let normalized = modelName.lowercased()
+            if let exact = enabledRates.first(where: {
+                $0.modelName.lowercased() == normalized
+            }) {
+                return exact
+            }
+        }
+        return enabledRates.first
     }
 }
 

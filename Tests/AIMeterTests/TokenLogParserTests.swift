@@ -70,8 +70,34 @@ final class TokenLogParserTests: XCTestCase {
 
         XCTAssertEqual(
             TokenLogParser.claudeUsage(in: object),
-            ParsedTokenUsage(identifier: "message-1", tokens: 100)
+            ParsedTokenUsage(
+                identifier: "message-1",
+                breakdown: TokenBreakdown(
+                    inputTokens: 10,
+                    outputTokens: 20,
+                    cacheWriteTokens: 30,
+                    cacheReadTokens: 40
+                )
+            )
         )
+    }
+
+    func testClaudeUsageParsesModelName() throws {
+        let object: [String: Any] = [
+            "type": "assistant",
+            "message": [
+                "id": "message-1",
+                "model": "claude-sonnet-4-6",
+                "usage": [
+                    "input_tokens": 10,
+                    "output_tokens": 20
+                ]
+            ]
+        ]
+
+        let usage = try XCTUnwrap(TokenLogParser.claudeUsage(in: object))
+
+        XCTAssertEqual(usage.modelName, "claude-sonnet-4-6")
     }
 
     func testClaudeUsageProbeParsesSessionAndWeeklyQuota() throws {
@@ -175,7 +201,95 @@ final class TokenLogParserTests: XCTestCase {
 
         XCTAssertEqual(
             TokenLogParser.genericUsage(in: object),
-            ParsedTokenUsage(identifier: "gemini-1", tokens: 160)
+            ParsedTokenUsage(
+                identifier: "gemini-1",
+                breakdown: TokenBreakdown(
+                    inputTokens: 120,
+                    outputTokens: 30,
+                    cachedInputTokens: 10
+                )
+            )
+        )
+    }
+
+    func testGenericExplicitTotalWithoutSplitMapsToOtherTokens() throws {
+        let object: [String: Any] = [
+            "id": "generic-1",
+            "modelName": "custom-model",
+            "usage": [
+                "totalTokens": 42
+            ]
+        ]
+
+        let usage = try XCTUnwrap(TokenLogParser.genericUsage(in: object))
+
+        XCTAssertEqual(usage.identifier, "generic-1")
+        XCTAssertEqual(usage.breakdown, TokenBreakdown(otherTokens: 42))
+        XCTAssertEqual(usage.modelName, "custom-model")
+    }
+
+    func testTokenCostEstimatorCalculatesUsdEstimate() throws {
+        let rate = TokenCostRate(
+            id: "openai-test",
+            provider: .openAI,
+            modelName: "gpt-test",
+            inputPerMillion: 2,
+            outputPerMillion: 10,
+            cachedInputPerMillion: 0.2,
+            cacheWritePerMillion: 3,
+            cacheReadPerMillion: 0.5
+        )
+        let estimate = try XCTUnwrap(
+            TokenCostEstimator.estimate(
+                breakdown: TokenBreakdown(
+                    inputTokens: 1_000_000,
+                    outputTokens: 500_000,
+                    cachedInputTokens: 1_000_000,
+                    cacheWriteTokens: 100_000,
+                    cacheReadTokens: 200_000
+                ),
+                rate: rate,
+                modelName: "gpt-test"
+            )
+        )
+
+        XCTAssertEqual(estimate.currencyCode, "USD")
+        XCTAssertEqual(estimate.estimatedAmount, Decimal(string: "7.6"))
+        XCTAssertFalse(estimate.isEstimated)
+    }
+
+    func testTokenCostEstimatorMarksOtherTokensEstimated() throws {
+        let rate = TokenCostRate(
+            id: "openai-test",
+            provider: .openAI,
+            modelName: "gpt-test",
+            inputPerMillion: 2,
+            outputPerMillion: 10
+        )
+        let estimate = try XCTUnwrap(
+            TokenCostEstimator.estimate(
+                breakdown: TokenBreakdown(otherTokens: 500_000),
+                rate: rate,
+                modelName: nil
+            )
+        )
+
+        XCTAssertEqual(estimate.estimatedAmount, Decimal(1))
+        XCTAssertTrue(estimate.isEstimated)
+    }
+
+    func testTokenCostEstimatorReturnsMissingRateReason() throws {
+        let estimate = try XCTUnwrap(
+            TokenCostEstimator.estimate(
+                breakdown: TokenBreakdown(inputTokens: 10),
+                rate: nil,
+                modelName: nil
+            )
+        )
+
+        XCTAssertEqual(
+            estimate.missingPricingReason,
+            "Pricing rate is not configured"
         )
     }
 
@@ -443,13 +557,17 @@ final class TokenLogParserTests: XCTestCase {
 
         XCTAssertEqual(first.tokens, 40)
         XCTAssertEqual(second.tokens, 100)
+        XCTAssertEqual(second.tokenBreakdown.otherTokens, 100)
     }
 
     func testProviderUsageRoundTripsForLaunchPersistence() throws {
         let usage = ProviderUsage(
             id: .openAI,
             tier: "Plus",
-            usedTokens: 123,
+            tokenBreakdown: TokenBreakdown(
+                inputTokens: 100,
+                outputTokens: 23
+            ),
             tokenLimit: 456,
             resetAt: Date(timeIntervalSince1970: 1_781_100_000),
             availability: .measured,
@@ -467,6 +585,13 @@ final class TokenLogParserTests: XCTestCase {
                         )
                     )
                 ]
+            ),
+            modelName: "gpt-test",
+            costEstimate: TokenCostEstimate(
+                currencyCode: "USD",
+                estimatedAmount: 0.25,
+                modelName: "gpt-test",
+                isEstimated: false
             )
         )
 
@@ -477,6 +602,53 @@ final class TokenLogParserTests: XCTestCase {
         )
 
         XCTAssertEqual(decoded, usage)
+    }
+
+    func testOldProviderUsageDecodesWithAggregateTokenBreakdown() throws {
+        let data = Data(
+            """
+            {
+              "id": "openAI",
+              "tier": "Plus",
+              "usedTokens": 123,
+              "tokenLimit": 0,
+              "resetAt": 0,
+              "availability": "measured",
+              "sourceDetail": "Old cached reading"
+            }
+            """.utf8
+        )
+
+        let decoded = try JSONDecoder().decode(ProviderUsage.self, from: data)
+
+        XCTAssertEqual(decoded.usedTokens, 123)
+        XCTAssertEqual(decoded.tokenBreakdown, TokenBreakdown(otherTokens: 123))
+        XCTAssertNil(decoded.costEstimate)
+    }
+
+    func testOldProviderConfigurationDecodesWithCostTrackingDisabled() throws {
+        let data = Data(
+            """
+            {
+              "id": "openAI",
+              "isEnabled": true,
+              "tier": "Plus",
+              "tokenLimit": 0,
+              "windowHours": 24,
+              "nextResetAt": 0,
+              "customPath": ""
+            }
+            """.utf8
+        )
+
+        let decoded = try JSONDecoder().decode(
+            ProviderConfiguration.self,
+            from: data
+        )
+
+        XCTAssertFalse(decoded.costTrackingEnabled)
+        XCTAssertEqual(decoded.defaultModelName, "")
+        XCTAssertTrue(decoded.customRates.isEmpty)
     }
 
     func testGenericScannerParsesFinalLineWithoutTrailingNewline() throws {

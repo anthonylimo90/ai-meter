@@ -13,13 +13,30 @@ enum SnapshotFixtures {
                 TimeInterval((index + 1) * 3_600)
             )
         }
+        configurations[0].costTrackingEnabled = true
+        configurations[0].defaultModelName = "gpt-5"
+        configurations[0].customRates = [
+            TokenCostRate(
+                id: "openai-gpt-5-fixture",
+                provider: .openAI,
+                modelName: "gpt-5",
+                inputPerMillion: 1.25,
+                outputPerMillion: 10,
+                cachedInputPerMillion: 0.125,
+                sourceNote: "Fixture rate"
+            )
+        ]
         configurations[2].customPath = "/Users/example/.gemini/history"
 
         let readings = [
             ProviderUsage(
                 id: .openAI,
                 tier: "Plus",
-                usedTokens: 1_460_000,
+                tokenBreakdown: TokenBreakdown(
+                    inputTokens: 860_000,
+                    outputTokens: 210_000,
+                    cachedInputTokens: 390_000
+                ),
                 tokenLimit: 0,
                 resetAt: referenceDate.addingTimeInterval(4 * 3_600 + 48 * 60),
                 availability: .measured,
@@ -46,6 +63,16 @@ enum SnapshotFixtures {
                         )
                     ],
                     observedAt: referenceDate
+                ),
+                modelName: "gpt-5",
+                costEstimate: TokenCostEstimator.estimate(
+                    breakdown: TokenBreakdown(
+                        inputTokens: 860_000,
+                        outputTokens: 210_000,
+                        cachedInputTokens: 390_000
+                    ),
+                    rate: configurations[0].customRates.first,
+                    modelName: "gpt-5"
                 )
             ),
             ProviderUsage(

@@ -281,6 +281,15 @@ private struct ProviderUsageRow: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
 
+                if let costText {
+                    Text(costText)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .help(costHelpText)
+                }
+
                 Text(planSummary(at: now))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -328,7 +337,7 @@ private struct ProviderUsageRow: View {
         .padding(.horizontal, 14)
         .frame(height: MeterTheme.rowHeight)
         .contentShape(Rectangle())
-        .help(reading.sourceDetail)
+        .help(helpText)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilitySummary(at: now))
     }
@@ -359,6 +368,30 @@ private struct ProviderUsageRow: View {
             return "\(reading.usedTokens.compactTokenString) tokens"
         }
         return "\(reading.usedTokens.compactTokenString) / \(reading.tokenLimit.compactTokenString) tokens"
+    }
+
+    private var costText: String? {
+        guard let estimate = reading.costEstimate else { return nil }
+        if estimate.missingPricingReason != nil {
+            return "Cost unavailable"
+        }
+        return "Est. \(estimate.estimatedAmount.currencyString(code: estimate.currencyCode))"
+    }
+
+    private var costHelpText: String {
+        guard let estimate = reading.costEstimate else { return "" }
+        if let reason = estimate.missingPricingReason {
+            return reason
+        }
+        let model = estimate.modelName ?? "configured rate"
+        return "Estimated from local records using \(model). Provider bills may differ."
+    }
+
+    private var helpText: String {
+        if reading.costEstimate != nil {
+            return "\(reading.sourceDetail); \(costHelpText)"
+        }
+        return reading.sourceDetail
     }
 
     private func percentText(at date: Date) -> String {
@@ -394,14 +427,22 @@ private struct ProviderUsageRow: View {
             }
             return "\(window.label): \(Int(window.usedPercent.rounded()))% used"
         case .configuredBudget:
-            return "Personal tracking budget"
+            return "Personal budget"
         case .unavailable:
             return "Plan limit unavailable"
         }
     }
 
     private func accessibilitySummary(at date: Date) -> String {
-        "\(reading.id.name), \(tokenSummary), \(percentText(at: date)) remaining, \(resetText(now: date))"
+        [
+            reading.id.name,
+            tokenSummary,
+            costText,
+            "\(percentText(at: date)) remaining",
+            resetText(now: date)
+        ]
+        .compactMap { $0 }
+        .joined(separator: ", ")
     }
 }
 
@@ -439,6 +480,18 @@ private extension Int {
             return String(format: "%.1fK", Double(self) / 1_000)
         }
         return formatted()
+    }
+}
+
+private extension Decimal {
+    func currencyString(code: String) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencyCode = code
+        formatter.minimumFractionDigits = self < 1 ? 4 : 2
+        formatter.maximumFractionDigits = self < 1 ? 4 : 2
+        return formatter.string(from: self as NSDecimalNumber)
+            ?? "\(code) \(self)"
     }
 }
 

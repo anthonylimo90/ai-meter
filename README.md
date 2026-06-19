@@ -15,6 +15,7 @@ not expose quota data.
   Copilot when compatible records are available.
 - Automatic refresh every 1, 5, or 15 minutes, with battery-aware behavior.
 - Optional token budgets and reset windows for providers without live limits.
+- Optional local cost estimates from user-configured model pricing.
 - No API keys, account credentials, or manual exports required.
 - Local-first: AI Meter does not upload your usage records or include telemetry.
 
@@ -96,6 +97,19 @@ AI Meter keeps two different measurements separate:
 When live plan usage is unavailable, you can configure a personal token budget,
 window, and reset time. These are your own reference values, not provider data.
 Leaving the fallback budget at `0` keeps the percentage unconfigured.
+
+## Cost Estimates
+
+AI Meter can estimate local token cost when you enable **Estimate token cost** in
+provider settings and enter USD-per-million-token rates for a model. These
+estimates are calculated locally from compatible usage records. They are not
+provider billing statements.
+
+Actual bills can differ because local records may omit model names or token
+splits, providers may apply subscription terms, caching discounts, credits,
+taxes, usage buckets, or other account-level adjustments, and official pricing
+can change. Keep the configured rates aligned with the provider's current
+pricing page if you use cost estimates for planning.
 
 ## Privacy
 

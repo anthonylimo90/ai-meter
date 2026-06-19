@@ -5,7 +5,7 @@ import AIMeterCore
 enum MeterTheme {
     static let panelWidth: CGFloat = 420
     static let cornerRadius: CGFloat = 22
-    static let rowHeight: CGFloat = 88
+    static let rowHeight: CGFloat = 104
     static let contentPadding: CGFloat = 20
 }
 
