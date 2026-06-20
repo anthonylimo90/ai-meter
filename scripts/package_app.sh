@@ -24,6 +24,7 @@ BUILD_ARGS=(
     --product AIMeter
     --disable-sandbox
     -Xswiftc -gnone
+    -Xlinker -rpath -Xlinker @executable_path/../Frameworks
 )
 if [[ -n "$ARCHS" ]]; then
     for arch in ${=ARCHS}; do
@@ -44,6 +45,20 @@ trap 'rm -rf "$STAGE_ROOT"' EXIT
 
 mkdir -p "$CONTENTS_DIR/MacOS" "$CONTENTS_DIR/Resources"
 install -m 755 "$BIN_DIR/AIMeter" "$CONTENTS_DIR/MacOS/AIMeter"
+
+# Embed Sparkle.framework (resolved by SwiftPM) so the app can self-update.
+SCRATCH_ROOT="${SWIFT_BUILD_SCRATCH_PATH:-$ROOT_DIR/.build}"
+SPARKLE_FRAMEWORK="$(
+    find "$SCRATCH_ROOT" -type d \
+        -path '*Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework' \
+        2>/dev/null | head -1
+)"
+if [[ -z "$SPARKLE_FRAMEWORK" ]]; then
+    print -u2 "Could not locate Sparkle.framework under $SCRATCH_ROOT"
+    exit 1
+fi
+mkdir -p "$CONTENTS_DIR/Frameworks"
+ditto "$SPARKLE_FRAMEWORK" "$CONTENTS_DIR/Frameworks/Sparkle.framework"
 
 RESOURCE_BUNDLE="$BIN_DIR/AIMeter_AIMeterUI.bundle"
 if [[ -d "$RESOURCE_BUNDLE" ]]; then
@@ -85,6 +100,12 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>SUFeedURL</key>
+    <string>https://anthonylimo90.github.io/ai-meter/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>gaT7/vOc+HjQPsnNBhvea6AWhPFcGfevymaV5qI4hps=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <false/>
 </dict>
 </plist>
 PLIST

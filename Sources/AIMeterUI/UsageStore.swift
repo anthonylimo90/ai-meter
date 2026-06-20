@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import Observation
 import AIMeterCore
@@ -26,18 +25,11 @@ public final class UsageStore {
     private var hasStartedAutoRefresh = false
     @ObservationIgnored
     private var lastClaudeQuotaAttemptAt: Date?
-    @ObservationIgnored
-    private let updateChecker: UpdateChecker
-    @ObservationIgnored
-    private let updateDownloader: UpdatePackageDownloader
 
-    public let appVersion: SemanticVersion
-    public let appVersionDisplay: String
-    var availableUpdate: AvailableUpdate?
-    var isCheckingForUpdates = false
-    var isDownloadingUpdate = false
-    var updateError: String?
-    var lastUpdateCheck: Date?
+    /// Update mechanism (Sparkle), injected by the app target at launch. Nil in
+    /// previews and the snapshot tool.
+    @ObservationIgnored
+    public var updater: AppUpdating?
 
     var readings: [ProviderUsage]
     var configurations: [ProviderConfiguration] {
@@ -82,12 +74,6 @@ public final class UsageStore {
     }
 
     public init() {
-        self.updateChecker = UpdateChecker()
-        self.updateDownloader = UpdatePackageDownloader()
-        let versionString = Self.currentBundleVersionString()
-        self.appVersionDisplay = versionString
-        self.appVersion = SemanticVersion(versionString)
-            ?? SemanticVersion(major: 0, minor: 0, patch: 0)
         let configurations = Self.loadConfigurations()
         self.configurations = configurations
         self.autoRefreshEnabled = UserDefaults.standard.object(
@@ -153,12 +139,6 @@ public final class UsageStore {
         previewConfigurations: [ProviderConfiguration]? = nil,
         lastUpdated: Date = .now
     ) {
-        updateChecker = UpdateChecker()
-        updateDownloader = UpdatePackageDownloader()
-        let versionString = Self.currentBundleVersionString()
-        appVersionDisplay = versionString
-        appVersion = SemanticVersion(versionString)
-            ?? SemanticVersion(major: 0, minor: 0, patch: 0)
         configurations = previewConfigurations
             ?? ProviderConfiguration.defaults(now: lastUpdated)
         autoRefreshEnabled = true
@@ -190,77 +170,19 @@ public final class UsageStore {
         openAIMenuBarReading != nil || claudeMenuBarReading != nil
     }
 
-    /// Queries GitHub for the latest release and compares it to the running
-    /// build. On demand only; AI Meter never checks in the background.
-    public func checkForUpdates() async {
-        guard !isCheckingForUpdates else { return }
-        isCheckingForUpdates = true
-        updateError = nil
-        defer { isCheckingForUpdates = false }
-        do {
-            let result = try await updateChecker.check(
-                currentVersion: appVersion
-            )
-            lastUpdateCheck = .now
-            switch result {
-            case .upToDate:
-                availableUpdate = nil
-            case let .updateAvailable(update):
-                availableUpdate = update
-            }
-        } catch {
-            updateError = Self.describeUpdateError(error)
-        }
+    public var canCheckForUpdates: Bool {
+        updater?.canCheckForUpdates ?? false
     }
 
-    /// Downloads the available update package, verifies its checksum, and hands
-    /// it to the system installer.
-    public func installAvailableUpdate() async {
-        guard let update = availableUpdate, !isDownloadingUpdate else { return }
-        isDownloadingUpdate = true
-        updateError = nil
-        defer { isDownloadingUpdate = false }
-        do {
-            let packageURL = try await updateDownloader
-                .downloadVerifiedPackage(for: update)
-            NSWorkspace.shared.open(packageURL)
-        } catch {
-            updateError = Self.describeUpdateError(error)
-        }
+    public var automaticallyChecksForUpdates: Bool {
+        get { updater?.automaticallyChecksForUpdates ?? false }
+        set { updater?.automaticallyChecksForUpdates = newValue }
     }
 
-    public func openReleasePage() {
-        guard let update = availableUpdate else { return }
-        NSWorkspace.shared.open(update.releaseURL)
-    }
-
-    static func currentBundleVersionString() -> String {
-        Bundle.main.object(
-            forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String ?? "0.0.0"
-    }
-
-    private static func describeUpdateError(_ error: Error) -> String {
-        switch error {
-        case let UpdateCheckError.requestFailed(code):
-            switch code {
-            case 404: return "No published releases were found."
-            case 403: return "GitHub rate limit reached. Try again later."
-            default: return "Update check failed (HTTP \(code))."
-            }
-        case let UpdateCheckError.network(message):
-            return "Could not reach GitHub: \(message)"
-        case let UpdateCheckError.unreadableVersion(tag):
-            return "Unrecognized release version \"\(tag)\"."
-        case UpdatePackageError.packageUnavailable:
-            return "This release has no downloadable package."
-        case UpdatePackageError.checksumMismatch:
-            return "The download failed verification and was discarded."
-        case let UpdatePackageError.downloadFailed(message):
-            return "Download failed: \(message)"
-        default:
-            return error.localizedDescription
-        }
+    /// Asks Sparkle to check for updates. Sparkle drives all subsequent UI
+    /// (release notes, download, install, relaunch).
+    public func checkForUpdates() {
+        updater?.checkForUpdates()
     }
 
     var statusSummary: String {

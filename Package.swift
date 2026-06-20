@@ -11,6 +11,12 @@ let package = Package(
         .executable(name: "AIMeter", targets: ["AIMeter"]),
         .executable(name: "AIMeterSnapshot", targets: ["AIMeterSnapshot"])
     ],
+    dependencies: [
+        .package(
+            url: "https://github.com/sparkle-project/Sparkle",
+            from: "2.9.0"
+        )
+    ],
     targets: [
         .target(
             name: "AIMeterCore",
@@ -26,7 +32,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "AIMeter",
-            dependencies: ["AIMeterUI"],
+            dependencies: [
+                "AIMeterUI",
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             path: "Sources/AIMeter"
         ),
         .executableTarget(

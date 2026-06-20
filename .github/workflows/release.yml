@@ -124,7 +124,13 @@ jobs:
           source Config/version.env
           ./scripts/package_app.sh
           ./scripts/package_installer.sh
-          shasum -a 256 "dist/AI Meter-${APP_VERSION}.pkg" > dist/SHA256SUMS
+          # Zipped .app is the Sparkle update artifact.
+          ditto --norsrc --noextattr --noqtn --noacl \
+            -c -k --keepParent "dist/AI Meter.app" \
+            "dist/AI Meter-${APP_VERSION}.zip"
+          shasum -a 256 \
+            "dist/AI Meter-${APP_VERSION}.pkg" \
+            "dist/AI Meter-${APP_VERSION}.zip" > dist/SHA256SUMS
 
       - name: Publish GitHub release
         env:
@@ -145,3 +151,51 @@ jobs:
             assets+=("dist/AI Meter-${APP_VERSION}.zip")
           fi
           gh release upload "$TAG" "${assets[@]}" --clobber
+
+      - name: Publish Sparkle appcast to GitHub Pages
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source Config/version.env
+          if [[ -z "${SPARKLE_ED_PRIVATE_KEY:-}" ]]; then
+            echo "::warning::SPARKLE_ED_PRIVATE_KEY is not set; skipping appcast publish. In-app updates will not be offered until this is configured."
+            exit 0
+          fi
+          TAG="v${APP_VERSION}"
+          ZIP="dist/AI Meter-${APP_VERSION}.zip"
+          test -f "$ZIP"
+
+          # Resolve the uploaded zip asset's public download URL.
+          ENCLOSURE_URL="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
+            --jq '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -1)"
+          test -n "$ENCLOSURE_URL"
+
+          # Sign the archive and generate the appcast.
+          KEY_FILE="$(mktemp)"
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$KEY_FILE"
+          ZIP_PATH="$ZIP" ENCLOSURE_URL="$ENCLOSURE_URL" ED_KEY_FILE="$KEY_FILE" \
+            OUTPUT="dist/appcast.xml" ./scripts/make_appcast.sh
+          rm -f "$KEY_FILE"
+
+          # Publish appcast.xml to the gh-pages branch.
+          PAGES_DIR="$(mktemp -d)"
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git clone --depth 1 --branch gh-pages "$REMOTE" "$PAGES_DIR" 2>/dev/null; then
+            :
+          else
+            git clone --depth 1 "$REMOTE" "$PAGES_DIR"
+            git -C "$PAGES_DIR" checkout --orphan gh-pages
+            git -C "$PAGES_DIR" rm -rf . >/dev/null 2>&1 || true
+          fi
+          cp dist/appcast.xml "$PAGES_DIR/appcast.xml"
+          touch "$PAGES_DIR/.nojekyll"
+          git -C "$PAGES_DIR" config user.name "github-actions[bot]"
+          git -C "$PAGES_DIR" config user.email "github-actions[bot]@users.noreply.github.com"
+          git -C "$PAGES_DIR" add appcast.xml .nojekyll
+          git -C "$PAGES_DIR" commit -m "Update appcast for ${APP_VERSION}" \
+            || { echo "appcast unchanged"; exit 0; }
+          git -C "$PAGES_DIR" push origin gh-pages

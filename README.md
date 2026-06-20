@@ -16,7 +16,7 @@ not expose quota data.
 - Automatic refresh every 1, 5, or 15 minutes, with battery-aware behavior.
 - Optional token budgets and reset windows for providers without live limits.
 - Optional local cost estimates from user-configured model pricing.
-- On-demand update checks against this project's public GitHub releases.
+- Signed in-app updates via Sparkle, with optional automatic checking.
 - No API keys, account credentials, or manual exports required.
 - Local-first: AI Meter does not upload your usage records or include telemetry.
 
@@ -123,24 +123,26 @@ executable with `--safe-mode`, opens `/usage`, and parses only the percentages,
 reset times, and detected plan name. Claude Code may make its own network
 request while doing this.
 
-When you select **Check for Updates**, AI Meter makes one request to GitHub's
-public releases API for this project. This is the only network request AI Meter
-makes on its own, it happens only when you ask, and it sends no usage data,
-account data, or identifiers — just the standard IP address and user agent of
-the request. AI Meter never checks for updates in the background.
+For updates, AI Meter uses [Sparkle](https://sparkle-project.org). When you
+check for updates — or, if you opt in, on Sparkle's periodic schedule — it
+fetches a small update feed (an "appcast") served from this project's GitHub
+Pages site. The request sends no usage data, account data, or identifiers, only
+the standard IP address and user agent. Automatic checking is **off by default**.
 
 ## Updating
 
-AI Meter can tell you when a newer release is available:
+AI Meter updates itself in place:
 
-1. Open **Settings > About** and select **Check for Updates**.
-2. If a newer version exists, choose **Download & Install**. AI Meter downloads
-   the release package, verifies it against the published checksum, and opens
-   the installer.
-3. Complete the standard installer to replace your installation.
+1. Open **Settings > About** and select **Check for Updates** (or enable
+   **Check for updates automatically**).
+2. If a newer version exists, Sparkle shows the release and an **Install**
+   button.
+3. AI Meter verifies the update's cryptographic (EdDSA) signature, replaces
+   itself, and relaunches.
 
-The checksum verification detects a corrupted or incomplete download. Stronger
-signature-based verification is planned (see `docs/auto-update-plan.md`).
+Every update is signed with a private key held only in CI; the app embeds the
+matching public key and refuses any update that fails verification. See
+`docs/auto-update-plan.md` for the design.
 
 ## Troubleshooting
 

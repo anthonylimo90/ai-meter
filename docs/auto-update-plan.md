@@ -1,8 +1,21 @@
 # AI Meter In-App Update Plan
 
-Status: Phase 1 in progress; Phase 2 planned
-Target release: 0.4.0 (Phase 1)
+Status: Phase 1 shipped in 0.4.0; Phase 2 (Sparkle) implemented for 0.5.0
+Target release: 0.4.0 (Phase 1), 0.5.0 (Phase 2)
 Last updated: June 20, 2026
+
+## 0. Decisions and status
+
+- Phase 1 (on-demand GitHub Releases checker) shipped in 0.4.0 and is now
+  superseded.
+- Phase 2 uses **Sparkle** with **EdDSA** signatures. The appcast is published
+  to **GitHub Pages** at `https://anthonylimo90.github.io/ai-meter/appcast.xml`.
+- The update artifact is a **zipped `.app`** for silent in-place updates.
+- The EdDSA private key lives in the GitHub Actions secret
+  `SPARKLE_ED_PRIVATE_KEY`; the public key is embedded as `SUPublicEDKey`.
+- **One-time manual step:** enable GitHub Pages for the `gh-pages` branch
+  (Settings > Pages > Deploy from a branch > `gh-pages` / root) after the first
+  release creates that branch.
 
 ## 1. Purpose
 

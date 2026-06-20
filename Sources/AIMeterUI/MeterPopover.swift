@@ -26,7 +26,7 @@ public struct MeterPopover: View {
                 .padding(.horizontal, MeterTheme.contentPadding)
                 .padding(.top, 16)
 
-            PopoverFooter(store: store, openSettings: openSettings)
+            PopoverFooter(openSettings: openSettings)
         }
         .frame(width: MeterTheme.panelWidth)
         .background {
@@ -194,7 +194,6 @@ private struct ProviderUsageList: View {
 }
 
 private struct PopoverFooter: View {
-    let store: UsageStore
     let openSettings: OpenSettingsAction
 
     var body: some View {
@@ -209,21 +208,6 @@ private struct PopoverFooter: View {
             .foregroundStyle(.secondary)
 
             Spacer()
-
-            if let update = store.availableUpdate {
-                Button {
-                    NSApplication.shared.activate(ignoringOtherApps: true)
-                    openSettings()
-                } label: {
-                    Label(
-                        "Update to \(update.version.description)",
-                        systemImage: "arrow.down.circle.fill"
-                    )
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.green)
-                .help("A newer version is available. Open Settings to install.")
-            }
 
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
