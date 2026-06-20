@@ -146,6 +146,29 @@ matching public key and refuses any update that fails verification. See
 
 ## Troubleshooting
 
+**macOS says the installer "could not verify… is free of malware"**
+
+AI Meter releases are not yet notarized by Apple, so macOS quarantines the
+downloaded package and Gatekeeper blocks it. The package is unaffected; this is
+the standard prompt for software distributed outside the App Store. Install it
+either way:
+
+- Remove the quarantine flag, then open it (replace `<version>` and the path if
+  you saved it elsewhere):
+
+  ```sh
+  xattr -d com.apple.quarantine ~/Downloads/AI.Meter-<version>.pkg
+  open ~/Downloads/AI.Meter-<version>.pkg
+  ```
+
+- Or double-click the package, then open **System Settings > Privacy &
+  Security**, find the blocked-item message under **Security**, and choose
+  **Open Anyway**.
+
+This affects only the first install from a download. In-app updates are
+cryptographically verified (see [Updating](#updating)) and are not subject to
+this prompt.
+
 **AI Meter launched but no window appeared**
 
 This is expected. Select AI Meter on the right side of the menu bar.
