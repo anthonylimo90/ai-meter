@@ -6,13 +6,13 @@
     <description>Updates for AI Meter, the macOS menu-bar AI usage meter.</description>
     <language>en</language>
     <item>
-      <title>AI Meter 0.6.0</title>
-      <pubDate>Sat, 20 Jun 2026 11:28:59 +0000</pubDate>
-      <sparkle:version>8</sparkle:version>
-      <sparkle:shortVersionString>0.6.0</sparkle:shortVersionString>
+      <title>AI Meter 0.7.0</title>
+      <pubDate>Sat, 20 Jun 2026 12:04:43 +0000</pubDate>
+      <sparkle:version>9</sparkle:version>
+      <sparkle:shortVersionString>0.7.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[<p>AI Meter 0.6.0. See the <a href="https://github.com/anthonylimo90/ai-meter/releases/tag/v0.6.0">release notes</a> for details.</p>]]></description>
-      <enclosure url="https://github.com/anthonylimo90/ai-meter/releases/download/v0.6.0/AI.Meter-0.6.0.zip" type="application/octet-stream" sparkle:edSignature="P++eErQO5e0tjlOCMNBFSqRqmLwqVh1OKbewlVFP8EQopkSUbY7ZUKrESgjc20kHXJQ8669xRoV3CZGVOWFRDQ==" length="3631159" />
+      <description><![CDATA[<p>AI Meter 0.7.0. See the <a href="https://github.com/anthonylimo90/ai-meter/releases/tag/v0.7.0">release notes</a> for details.</p>]]></description>
+      <enclosure url="https://github.com/anthonylimo90/ai-meter/releases/download/v0.7.0/AI.Meter-0.7.0.zip" type="application/octet-stream" sparkle:edSignature="JP50N0RmzRATvBAxXbA+D4Xu+oql9MRbdrtE3Dt9jHGxlBIBRwK1V991SBmooOk5OO02Z+zzJyBLdWF6zr9UAw==" length="3655436" />
     </item>
   </channel>
 </rss>
