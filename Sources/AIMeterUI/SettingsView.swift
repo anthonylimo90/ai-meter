@@ -188,10 +188,92 @@ public struct SettingsView: View {
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
 
+            Divider()
+
+            updatesSection
+
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding()
+    }
+
+    private var updatesSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Updates")
+                .font(.headline)
+
+            HStack(spacing: 12) {
+                Button {
+                    Task { await store.checkForUpdates() }
+                } label: {
+                    if store.isCheckingForUpdates {
+                        Label("Checking…", systemImage: "arrow.triangle.2.circlepath")
+                    } else {
+                        Label("Check for Updates", systemImage: "arrow.down.circle")
+                    }
+                }
+                .disabled(store.isCheckingForUpdates || store.isDownloadingUpdate)
+
+                if let lastCheck = store.lastUpdateCheck {
+                    Text(
+                        "Checked \(lastCheck.formatted(date: .abbreviated, time: .shortened))"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                }
+            }
+
+            updateStatusView
+
+            Text(
+                "AI Meter checks for updates only when you ask, by reading this project's public GitHub releases. Downloads are verified against the release checksum before opening the installer."
+            )
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private var updateStatusView: some View {
+        if let error = store.updateError {
+            Label(error, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if let update = store.availableUpdate {
+            VStack(alignment: .leading, spacing: 8) {
+                Label(
+                    "Version \(update.version.description) is available.",
+                    systemImage: "sparkles"
+                )
+                .font(.callout)
+                .foregroundStyle(.green)
+
+                HStack(spacing: 12) {
+                    Button {
+                        Task { await store.installAvailableUpdate() }
+                    } label: {
+                        if store.isDownloadingUpdate {
+                            Label("Downloading…", systemImage: "arrow.down.circle")
+                        } else {
+                            Label("Download & Install", systemImage: "arrow.down.circle.fill")
+                        }
+                    }
+                    .disabled(store.isDownloadingUpdate)
+
+                    Button("Release Notes") {
+                        store.openReleasePage()
+                    }
+                    .buttonStyle(.link)
+                }
+            }
+        } else if store.lastUpdateCheck != nil {
+            Label("AI Meter is up to date.", systemImage: "checkmark.circle.fill")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
     }
 
     private func settingsHeader(
