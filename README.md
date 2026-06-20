@@ -9,7 +9,8 @@ quota data.
 
 ## Highlights
 
-- Live remaining-usage meters for Codex when its client exposes plan data.
+- Live remaining-usage meters for Codex, and for Claude with an optional
+  one-click status-line helper.
 - Local token totals for OpenAI/Codex, Claude, Gemini, Cursor, and GitHub
   Copilot when compatible records are available.
 - Automatic refresh every 1, 5, or 15 minutes, with battery-aware behavior.
@@ -74,7 +75,7 @@ token metadata, or it does not publish a trustworthy plan limit.
 | Provider | Local source | What AI Meter can show |
 | --- | --- | --- |
 | OpenAI / Codex | `~/.codex/sessions` | Local tokens plus provider-reported 5-hour and weekly Codex plan windows when present |
-| Claude | `~/.claude/projects` | Local token totals (Claude does not expose plan quota in a readable local form) |
+| Claude | `~/.claude/projects` (+ optional status-line helper) | Local token totals, plus live 5-hour and weekly plan limits when **Show live Claude plan usage** is enabled |
 | Gemini | `~/.gemini/tmp`, `~/.gemini/history` | Local tokens when compatible timestamped metadata is present |
 | Cursor | `~/.cursor`, Cursor's `globalStorage` folder | Local tokens when compatible timestamped metadata is present |
 | GitHub Copilot | Copilot CLI and VS Code `globalStorage` folders | Local tokens when compatible timestamped metadata is present |
@@ -88,7 +89,8 @@ usage. You can add a custom JSON, JSONL, or log folder in Provider settings.
 AI Meter keeps two different measurements separate:
 
 - **Plan usage** is a percentage and reset time reported by the provider's own
-  client. AI Meter reads this for Codex, the one client that records it locally.
+  client. AI Meter reads this for Codex from its local session records, and for
+  Claude through the optional status-line helper (see **Claude live usage**).
 - **Local token usage** is counted from compatible records stored on your Mac.
   It is useful for tracking activity, but it is not necessarily the same as a
   provider's billing or subscription quota.
@@ -96,6 +98,28 @@ AI Meter keeps two different measurements separate:
 When live plan usage is unavailable, you can configure a personal token budget,
 window, and reset time. These are your own reference values, not provider data.
 Leaving the fallback budget at `0` keeps the percentage unconfigured.
+
+## Claude live usage
+
+Claude Code does not record its plan limits in its session logs the way Codex
+does, but it *does* pass them to a configured status line. AI Meter uses that
+sanctioned, local channel.
+
+Turn on **Settings > General > Show live Claude plan usage** and AI Meter:
+
+1. Installs a small helper script and points Claude Code's `statusLine` at it
+   (your existing status line, if any, is preserved and still runs).
+2. The helper writes only Claude's `rate_limits` (5-hour and weekly
+   `used_percentage` and reset times) to a file under
+   `~/.config/ai-meter/`.
+3. AI Meter reads that file and shows your live Claude plan usage.
+
+This uses no account credentials and makes no network requests — Claude Code
+itself hands AI Meter the data through its
+[documented status line](https://code.claude.com/docs/en/statusline). The values
+update while Claude Code is running; when it is idle, AI Meter shows the last
+known reading until its window resets. Turning the setting off removes the helper
+and restores your previous status line.
 
 ## Cost Estimates
 
@@ -179,10 +203,10 @@ This is common for clients that do not expose token-level usage locally.
 
 **Claude shows tokens but no plan percentage**
 
-This is expected. Claude does not expose plan quota (5-hour / weekly limits) in a
-readable local form, so AI Meter shows Claude's local token totals and any budget
-you configure under **Settings > Providers**. Codex is currently the only client
-that records its plan limits locally.
+By default Claude shows local token totals only. To see live 5-hour and weekly
+limits, enable **Settings > General > Show live Claude plan usage** (see
+[Claude live usage](#claude-live-usage)). The percentage appears after Claude
+Code runs and refreshes its status line at least once.
 
 **Refreshes are less frequent than configured**
 

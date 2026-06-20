@@ -244,12 +244,178 @@ final class TokenLogParserTests: XCTestCase {
         let result = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [],
-            now: now
+            now: now,
+            claudeStatuslineUsage: { nil }
         )
 
         // No local folder -> unavailable, and never a provider-reported plan.
         XCTAssertNil(result.planUsage)
         XCTAssertEqual(result.availability, .unavailable)
+    }
+
+    func testClaudeStatuslineUsageParsesRateLimits() throws {
+        let object: [String: Any] = [
+            "rate_limits": [
+                "five_hour": [
+                    "used_percentage": 23.5,
+                    "resets_at": 1_781_103_600
+                ],
+                "seven_day": [
+                    "used_percentage": 41.2,
+                    "resets_at": 1_781_600_000
+                ]
+            ]
+        ]
+
+        let snapshot = try XCTUnwrap(
+            ClaudeStatuslineUsage.snapshot(
+                from: object,
+                observedAt: Date(timeIntervalSince1970: 1_781_100_000)
+            )
+        )
+
+        XCTAssertEqual(snapshot.source, .providerReported)
+        XCTAssertEqual(snapshot.windows.count, 2)
+        XCTAssertEqual(snapshot.windows[0].label, "5-hour")
+        XCTAssertEqual(snapshot.windows[0].usedPercent, 23.5)
+        XCTAssertEqual(
+            snapshot.windows[0].resetsAt,
+            Date(timeIntervalSince1970: 1_781_103_600)
+        )
+        XCTAssertEqual(snapshot.windows[1].label, "Weekly")
+        XCTAssertEqual(snapshot.windows[1].usedPercent, 41.2)
+    }
+
+    func testClaudeStatuslineUsageIgnoresMissingRateLimits() {
+        // Absent / unsubscribed sessions carry no rate_limits.
+        XCTAssertNil(
+            ClaudeStatuslineUsage.snapshot(
+                from: ["model": ["display_name": "Opus"]],
+                observedAt: Date()
+            )
+        )
+    }
+
+    func testClaudeUsesStatuslineRateLimitsForPlanQuota() throws {
+        let now = Date(timeIntervalSince1970: 1_781_100_000)
+        let configuration = configuration(
+            id: .claude,
+            now: now,
+            windowHours: 24
+        )
+        let snapshot = PlanUsageSnapshot(
+            source: .providerReported,
+            planName: nil,
+            windows: [
+                PlanUsageWindow(
+                    label: "5-hour",
+                    usedPercent: 30,
+                    windowMinutes: 300,
+                    resetsAt: now.addingTimeInterval(3_600)
+                ),
+                PlanUsageWindow(
+                    label: "Weekly",
+                    usedPercent: 60,
+                    windowMinutes: 10_080,
+                    resetsAt: now.addingTimeInterval(6 * 24 * 3_600)
+                )
+            ],
+            observedAt: now
+        )
+
+        let result = LocalUsageScanner.scan(
+            configuration: configuration,
+            rootsOverride: [URL(fileURLWithPath: NSTemporaryDirectory())],
+            now: now,
+            claudeStatuslineUsage: { snapshot }
+        )
+
+        XCTAssertEqual(result.planUsage?.source, .providerReported)
+        XCTAssertEqual(result.planUsage?.windows.count, 2)
+        XCTAssertEqual(result.planUsage?.windows.first?.remainingPercent, 70)
+    }
+
+    func testStatuslineInstallerWrapsAndRestoresExistingStatusLine() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("aimeter-install-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let settingsURL = root.appendingPathComponent("settings.json")
+        let original: [String: Any] = [
+            "model": "opus",
+            "statusLine": [
+                "type": "command",
+                "command": "bash ~/.claude/statusline-command.sh"
+            ]
+        ]
+        try JSONSerialization.data(withJSONObject: original)
+            .write(to: settingsURL)
+
+        let paths = ClaudeStatuslineInstaller.Paths(
+            settings: settingsURL,
+            supportDir: root.appendingPathComponent("support")
+        )
+
+        XCTAssertFalse(ClaudeStatuslineInstaller.isEnabled(paths: paths))
+
+        try ClaudeStatuslineInstaller.enable(paths: paths)
+        XCTAssertTrue(ClaudeStatuslineInstaller.isEnabled(paths: paths))
+        // Helper installed and executable.
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: paths.helper.path))
+        // The previous command is preserved for forwarding.
+        XCTAssertEqual(
+            try String(contentsOf: paths.previousCommand, encoding: .utf8),
+            "bash ~/.claude/statusline-command.sh"
+        )
+        // Unrelated settings keys are preserved.
+        let afterEnable = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: settingsURL)
+        ) as? [String: Any]
+        XCTAssertEqual(afterEnable?["model"] as? String, "opus")
+
+        try ClaudeStatuslineInstaller.disable(paths: paths)
+        XCTAssertFalse(ClaudeStatuslineInstaller.isEnabled(paths: paths))
+        let restored = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: settingsURL)
+        ) as? [String: Any]
+        let statusLine = restored?["statusLine"] as? [String: Any]
+        XCTAssertEqual(
+            statusLine?["command"] as? String,
+            "bash ~/.claude/statusline-command.sh"
+        )
+        XCTAssertEqual(restored?["model"] as? String, "opus")
+    }
+
+    func testStatuslineInstallerRemovesEntryWhenNonePreexisted() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("aimeter-install-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let settingsURL = root.appendingPathComponent("settings.json")
+        try JSONSerialization.data(withJSONObject: ["model": "opus"])
+            .write(to: settingsURL)
+        let paths = ClaudeStatuslineInstaller.Paths(
+            settings: settingsURL,
+            supportDir: root.appendingPathComponent("support")
+        )
+
+        try ClaudeStatuslineInstaller.enable(paths: paths)
+        XCTAssertTrue(ClaudeStatuslineInstaller.isEnabled(paths: paths))
+
+        try ClaudeStatuslineInstaller.disable(paths: paths)
+        let restored = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: settingsURL)
+        ) as? [String: Any]
+        XCTAssertNil(restored?["statusLine"])
+        XCTAssertEqual(restored?["model"] as? String, "opus")
     }
 
     func testCodexSubtractsPreWindowCumulativeBaseline() throws {

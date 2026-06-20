@@ -48,7 +48,10 @@ public enum LocalUsageScanner {
     static func scan(
         configuration: ProviderConfiguration,
         rootsOverride: [URL]? = nil,
-        now: Date = .now
+        now: Date = .now,
+        claudeStatuslineUsage: @Sendable () -> PlanUsageSnapshot? = {
+            ClaudeStatuslineUsage.read()
+        }
     ) -> ScanResult {
         let windowStart = Calendar.current.date(
             byAdding: .hour,
@@ -83,14 +86,22 @@ public enum LocalUsageScanner {
                     detail: "No local data folder is available"
                 )
             }
-            // Claude no longer exposes plan quota in a readable local form, so
-            // report local token totals only (an optional budget can still be
-            // configured), like the other token-only providers.
             let tokenScan = scanClaude(
                 files: inventory.files,
                 after: windowStart,
                 inventoryWarnings: inventory.warningCount
             )
+            // Plan quota comes from Claude Code's status-line `rate_limits`,
+            // captured locally by the AI Meter helper. Without that setup,
+            // Claude is token-only like the other providers.
+            if let snapshot = claudeStatuslineUsage()?.active(at: now) {
+                return scanResult(
+                    configuration: configuration,
+                    tokenScan: tokenScan,
+                    planReadResult: .measured(snapshot),
+                    hasRoots: true
+                )
+            }
             return scanResult(
                 configuration: configuration,
                 tokenScan: tokenScan,

@@ -95,6 +95,35 @@ public struct SettingsView: View {
             }
 
             settingsHeader(
+                title: "Claude Live Usage",
+                detail: "Claude doesn't record its plan limits locally. Turn this on to add a small status-line helper to Claude Code so AI Meter can read your 5-hour and weekly Claude usage — no credentials, no network. Your existing status line is preserved, and turning it off removes the helper."
+            )
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle(
+                        "Show live Claude plan usage",
+                        isOn: claudeStatuslineBinding
+                    )
+
+                    if let error = store.claudeStatuslineError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if store.claudeStatuslineEnabled {
+                        Label(
+                            "Enabled. Claude usage updates while Claude Code is running.",
+                            systemImage: "checkmark.circle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(4)
+            }
+
+            settingsHeader(
                 title: "How It Updates",
                 detail: "Local logs follow the selected refresh interval. Low Power Mode limits background refreshes to every 15 minutes."
             )
@@ -117,6 +146,13 @@ public struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private var claudeStatuslineBinding: Binding<Bool> {
+        Binding(
+            get: { store.claudeStatuslineEnabled },
+            set: { store.setClaudeStatuslineEnabled($0) }
+        )
     }
 
     private var providerSettings: some View {
@@ -182,7 +218,7 @@ public struct SettingsView: View {
             .fixedSize(horizontal: false, vertical: true)
 
             Text(
-                "Codex exposes plan windows in local session records, so AI Meter shows its live limits. Other providers, including Claude, do not expose quota in a readable local form, so they show local token totals and any budget you configure."
+                "Codex exposes plan windows in local session records, so AI Meter shows its live limits. Claude can show live limits too once you enable its status-line helper in General settings. Other providers show local token totals plus any budget you configure."
             )
             .font(.body)
             .foregroundStyle(.secondary)

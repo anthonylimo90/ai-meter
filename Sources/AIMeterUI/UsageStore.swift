@@ -27,6 +27,10 @@ public final class UsageStore {
     @ObservationIgnored
     public var updater: AppUpdating?
 
+    /// Whether the Claude status-line usage helper is installed.
+    var claudeStatuslineEnabled = false
+    var claudeStatuslineError: String?
+
     var readings: [ProviderUsage]
     var configurations: [ProviderConfiguration] {
         didSet {
@@ -123,6 +127,7 @@ public final class UsageStore {
             forKey: Self.lastUpdatedKey
         ) as? Date
         self.hasLoaded = !storedReadings.isEmpty
+        self.claudeStatuslineEnabled = ClaudeStatuslineInstaller.isEnabled()
     }
 
     public init(
@@ -171,6 +176,36 @@ public final class UsageStore {
     /// (release notes, download, install, relaunch).
     public func checkForUpdates() {
         updater?.checkForUpdates()
+    }
+
+    /// Installs or removes Claude Code's status-line helper that lets AI Meter
+    /// read live Claude plan usage locally.
+    public func setClaudeStatuslineEnabled(_ enabled: Bool) {
+        claudeStatuslineError = nil
+        do {
+            if enabled {
+                try ClaudeStatuslineInstaller.enable()
+            } else {
+                try ClaudeStatuslineInstaller.disable()
+            }
+        } catch {
+            claudeStatuslineError = Self.describeStatuslineError(error)
+        }
+        claudeStatuslineEnabled = ClaudeStatuslineInstaller.isEnabled()
+        Task { await refresh() }
+    }
+
+    private static func describeStatuslineError(_ error: Error) -> String {
+        switch error {
+        case ClaudeStatuslineInstaller.InstallError.settingsUnreadable:
+            return "Claude Code settings weren't found. Open Claude Code once, then try again."
+        case ClaudeStatuslineInstaller.InstallError.settingsNotJSON:
+            return "AI Meter couldn't read Claude Code's settings file."
+        case ClaudeStatuslineInstaller.InstallError.writeFailed:
+            return "AI Meter couldn't update Claude Code's settings."
+        default:
+            return error.localizedDescription
+        }
     }
 
     var statusSummary: String {
