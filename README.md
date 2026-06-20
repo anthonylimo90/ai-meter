@@ -182,6 +182,7 @@ Generate deterministic screenshots without reading local provider data:
 ```sh
 swift run AIMeterSnapshot implementation.png
 swift run AIMeterSnapshot settings.png --settings
+swift run AIMeterSnapshot menubar.png --menubar
 ```
 
 Public releases are universal (`arm64` and `x86_64`), Developer ID signed,

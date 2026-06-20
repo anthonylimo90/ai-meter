@@ -11,6 +11,7 @@ struct AIMeterSnapshot {
         let outputPath = arguments.first { !$0.hasPrefix("--") }
             ?? "implementation.png"
         let renderSettings = arguments.contains("--settings")
+        let renderMenuBar = arguments.contains("--menubar")
         let renderLive = arguments.contains("--live")
         let referenceDate: Date?
         let store: UsageStore
@@ -22,6 +23,9 @@ struct AIMeterSnapshot {
                 )
             )
             store = UsageStore()
+            referenceDate = nil
+        } else if renderMenuBar {
+            store = SnapshotFixtures.menuBarStore()
             referenceDate = nil
         } else {
             store = SnapshotFixtures.store()
@@ -42,6 +46,12 @@ struct AIMeterSnapshot {
                         )
                             .background(Color(nsColor: .windowBackgroundColor))
                             .environment(\.colorScheme, .light)
+                    } else if renderMenuBar {
+                        AIMeterMenuBarLabel(store: store)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(Color(red: 0.13, green: 0.14, blue: 0.16))
+                            .environment(\.colorScheme, .dark)
                     } else {
                         MeterPopover(
                             store: store,

@@ -19,6 +19,17 @@ public enum ProviderID: String, CaseIterable, Codable, Identifiable, Sendable {
         }
     }
 
+    /// Compact label for tight surfaces such as the menu bar.
+    public var shortName: String {
+        switch self {
+        case .openAI: "GPT"
+        case .claude: "Claude"
+        case .gemini: "Gemini"
+        case .cursor: "Cursor"
+        case .copilot: "Copilot"
+        }
+    }
+
     public var defaultTier: String {
         switch self {
         case .openAI: "Plus / Codex"

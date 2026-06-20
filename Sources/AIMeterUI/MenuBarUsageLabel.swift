@@ -1,4 +1,4 @@
-import AppKit
+import Foundation
 import SwiftUI
 import AIMeterCore
 
@@ -12,12 +12,12 @@ public struct AIMeterMenuBarLabel: View {
     public var body: some View {
         Group {
             if store.showMenuBarMeters, store.hasLiveMenuBarReadings {
-                HStack(spacing: 4) {
+                HStack(spacing: 8) {
                     if let reading = store.openAIMenuBarReading {
-                        ProviderMenuBarIcon(reading: reading)
+                        ProviderMenuBarMeter(reading: reading)
                     }
                     if let reading = store.claudeMenuBarReading {
-                        ProviderMenuBarIcon(reading: reading)
+                        ProviderMenuBarMeter(reading: reading)
                     }
                 }
             } else {
@@ -33,98 +33,69 @@ public struct AIMeterMenuBarLabel: View {
     }
 }
 
-private struct ProviderMenuBarIcon: View {
+private struct ProviderMenuBarMeter: View {
     let reading: ProviderUsage
 
     var body: some View {
-        Image(nsImage: statusImage)
-            .frame(width: 18, height: 18)
-        .help(
-            "\(reading.id.name): \(reading.remainingPercent ?? 0)% remaining"
-        )
-        .accessibilityLabel(
-            "\(reading.id.name), \(reading.remainingPercent ?? 0) percent remaining"
-        )
+        Text("\(reading.id.shortName) \(percentText)")
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(tint)
+            .help(helpText)
+            .accessibilityLabel(accessibilityText)
     }
 
-    private var statusImage: NSImage {
-        let fraction = reading.remainingFraction ?? 0
-        let symbolName = reading.id.symbolName
-        let bucket = Int((fraction * 20).rounded())
-        let key = "\(symbolName)|\(bucket)"
-        return MenuBarImageCache.image(for: key) {
-            makeStatusImage(
-                fraction: Double(bucket) / 20,
-                symbolName: symbolName
-            )
-        }
+    private var percentText: String {
+        guard let percent = reading.remainingPercent else { return "--" }
+        return "\(percent)%"
     }
 
-    private func makeStatusImage(
-        fraction: Double,
-        symbolName: String
-    ) -> NSImage {
-        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) {
-            _ in
-            let symbol = NSImage(
-                systemSymbolName: symbolName,
-                accessibilityDescription: nil
-            )?.withSymbolConfiguration(
-                NSImage.SymbolConfiguration(
-                    pointSize: 12,
-                    weight: .semibold
-                )
-            )
-            symbol?.draw(
-                in: NSRect(x: 3, y: 5, width: 12, height: 12),
-                from: .zero,
-                operation: .sourceOver,
-                fraction: 1
-            )
+    /// Green while the quota is healthy, escalating to orange then red so a low
+    /// provider draws the eye in the menu bar.
+    private var tint: Color {
+        guard let fraction = reading.remainingFraction else { return .secondary }
+        if fraction <= 0.10 { return .red }
+        if fraction <= 0.25 { return .orange }
+        return .green
+    }
 
-            let track = NSBezierPath(
-                roundedRect: NSRect(x: 2, y: 1, width: 14, height: 2),
-                xRadius: 1,
-                yRadius: 1
+    private var helpText: String {
+        var parts: [String] = []
+        if let percent = reading.remainingPercent {
+            parts.append(
+                "\(reading.id.name) · \(reading.tier): \(percent)% remaining"
             )
-            NSColor.labelColor.withAlphaComponent(0.25).setFill()
-            track.fill()
-
-            let fill = NSBezierPath(
-                roundedRect: NSRect(
-                    x: 2,
-                    y: 1,
-                    width: max(1, 14 * fraction),
-                    height: 2
-                ),
-                xRadius: 1,
-                yRadius: 1
-            )
-            NSColor.labelColor.setFill()
-            fill.fill()
-            return true
+        } else {
+            parts.append("\(reading.id.name) · \(reading.tier)")
         }
-        image.isTemplate = true
-        return image
+        if let window = reading.primaryPlanWindow {
+            parts.append(
+                "\(window.label): \(Int(window.usedPercent.rounded()))% used"
+            )
+            let untilReset = window.resetsAt.timeIntervalSinceNow
+            if untilReset > 0 {
+                parts.append("Resets in \(untilReset.menuBarDuration)")
+            }
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private var accessibilityText: String {
+        guard let percent = reading.remainingPercent else {
+            return "\(reading.id.name), usage unavailable"
+        }
+        return "\(reading.id.name), \(percent) percent remaining"
     }
 }
 
-private enum MenuBarImageCache {
-    private static let lock = NSLock()
-    nonisolated(unsafe)
-    private static var images: [String: NSImage] = [:]
-
-    static func image(
-        for key: String,
-        make: () -> NSImage
-    ) -> NSImage {
-        lock.withLock {
-            if let image = images[key] {
-                return image
-            }
-            let image = make()
-            images[key] = image
-            return image
-        }
+private extension TimeInterval {
+    var menuBarDuration: String {
+        let totalMinutes = max(Int(self / 60), 0)
+        let days = totalMinutes / 1_440
+        let hours = (totalMinutes % 1_440) / 60
+        let minutes = totalMinutes % 60
+        if days > 0 { return "\(days)d \(hours)h" }
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        return "\(minutes)m"
     }
 }

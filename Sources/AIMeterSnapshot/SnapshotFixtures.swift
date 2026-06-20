@@ -140,4 +140,64 @@ enum SnapshotFixtures {
             lastUpdated: referenceDate
         )
     }
+
+    /// Menu-bar previews need provider-reported windows that are still active
+    /// relative to the real clock, so anchor them to `now` instead of the fixed
+    /// `referenceDate`. Pairs a healthy provider with a low one to exercise the
+    /// urgency tint.
+    @MainActor
+    static func menuBarStore(now: Date = .now) -> UsageStore {
+        func reading(
+            id: ProviderID,
+            tier: String,
+            label: String,
+            usedPercent: Double,
+            resetsIn minutes: Int
+        ) -> ProviderUsage {
+            ProviderUsage(
+                id: id,
+                tier: tier,
+                usedTokens: 0,
+                tokenLimit: 0,
+                resetAt: now.addingTimeInterval(TimeInterval(minutes * 60)),
+                availability: .measured,
+                sourceDetail: "Menu-bar fixture",
+                planUsage: PlanUsageSnapshot(
+                    source: .providerReported,
+                    planName: tier,
+                    windows: [
+                        PlanUsageWindow(
+                            label: label,
+                            usedPercent: usedPercent,
+                            windowMinutes: minutes,
+                            resetsAt: now.addingTimeInterval(
+                                TimeInterval(minutes * 60)
+                            )
+                        )
+                    ],
+                    observedAt: now
+                )
+            )
+        }
+
+        return UsageStore(
+            previewReadings: [
+                reading(
+                    id: .openAI,
+                    tier: "Plus",
+                    label: "5-hour",
+                    usedPercent: 12,
+                    resetsIn: 288
+                ),
+                reading(
+                    id: .claude,
+                    tier: "Max",
+                    label: "5-hour",
+                    usedPercent: 91,
+                    resetsIn: 42
+                )
+            ],
+            lastUpdated: now
+        )
+    }
 }
