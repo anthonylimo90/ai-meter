@@ -32,7 +32,7 @@ struct AIMeterSnapshot {
             referenceDate = SnapshotFixtures.referenceDate
         }
         if renderLive, !renderSettings {
-            await store.refresh(forceClaudeQuota: true)
+            await store.refresh()
         }
 
         _ = NSApplication.shared

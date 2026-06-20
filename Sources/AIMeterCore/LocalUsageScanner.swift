@@ -6,8 +6,7 @@ public enum LocalUsageScanner {
     private static let maximumLineSize = 8_000_000
 
     public static func results(
-        configurations: [ProviderConfiguration],
-        fetchClaudeQuota: Bool = true
+        configurations: [ProviderConfiguration]
     ) -> AsyncStream<ScanResult> {
         AsyncStream { continuation in
             let task = Task {
@@ -15,16 +14,7 @@ public enum LocalUsageScanner {
                     for configuration in configurations {
                         group.addTask {
                             guard !Task.isCancelled else { return nil }
-                            return scan(
-                                configuration: configuration,
-                                claudeUsage: {
-                                    fetchClaudeQuota
-                                        ? ClaudeUsageProbe.fetch()
-                                        : PlanUsageReadResult(
-                                            status: .notRequested
-                                        )
-                                }
-                            )
+                            return scan(configuration: configuration)
                         }
                     }
 
@@ -44,14 +34,10 @@ public enum LocalUsageScanner {
     }
 
     public static func scan(
-        configurations: [ProviderConfiguration],
-        fetchClaudeQuota: Bool = true
+        configurations: [ProviderConfiguration]
     ) async -> [ScanResult] {
         var resultsByProvider: [ProviderID: ScanResult] = [:]
-        for await result in results(
-            configurations: configurations,
-            fetchClaudeQuota: fetchClaudeQuota
-        ) {
+        for await result in results(configurations: configurations) {
             resultsByProvider[result.provider] = result
         }
         return configurations.compactMap {
@@ -62,10 +48,7 @@ public enum LocalUsageScanner {
     static func scan(
         configuration: ProviderConfiguration,
         rootsOverride: [URL]? = nil,
-        now: Date = .now,
-        claudeUsage: @Sendable () -> PlanUsageReadResult = {
-            ClaudeUsageProbe.fetch()
-        }
+        now: Date = .now
     ) -> ScanResult {
         let windowStart = Calendar.current.date(
             byAdding: .hour,
@@ -92,29 +75,31 @@ public enum LocalUsageScanner {
 
         switch configuration.id {
         case .claude:
+            guard !roots.isEmpty else {
+                return ScanResult(
+                    provider: configuration.id,
+                    tokens: 0,
+                    availability: .unavailable,
+                    detail: "No local data folder is available"
+                )
+            }
+            // Claude no longer exposes plan quota in a readable local form, so
+            // report local token totals only (an optional budget can still be
+            // configured), like the other token-only providers.
             let tokenScan = scanClaude(
                 files: inventory.files,
                 after: windowStart,
                 inventoryWarnings: inventory.warningCount
             )
-            let rawPlanReadResult = claudeUsage()
-            let activePlanUsage = rawPlanReadResult.snapshot?.active(at: now)
-            let planStatus: PlanUsageReadStatus
-            if rawPlanReadResult.status == .measured, activePlanUsage == nil {
-                planStatus = .unavailable(
-                    "Claude plan limits have expired"
-                )
-            } else {
-                planStatus = rawPlanReadResult.status
-            }
             return scanResult(
                 configuration: configuration,
                 tokenScan: tokenScan,
                 planReadResult: PlanUsageReadResult(
-                    status: planStatus,
-                    snapshot: activePlanUsage
+                    status: .unavailable(
+                        "Provider-reported plan usage is not exposed"
+                    )
                 ),
-                hasRoots: !roots.isEmpty
+                hasRoots: true
             )
         case .openAI:
             guard !roots.isEmpty else {

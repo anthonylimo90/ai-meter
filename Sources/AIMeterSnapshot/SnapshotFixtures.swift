@@ -80,30 +80,9 @@ enum SnapshotFixtures {
                 tier: "Max",
                 usedTokens: 58_800_000,
                 tokenLimit: 0,
-                resetAt: referenceDate.addingTimeInterval(90 * 60),
+                resetAt: referenceDate.addingTimeInterval(24 * 3_600),
                 availability: .measured,
-                sourceDetail: "Fixture Claude usage",
-                planUsage: PlanUsageSnapshot(
-                    source: .providerReported,
-                    planName: "Max",
-                    windows: [
-                        PlanUsageWindow(
-                            label: "5-hour",
-                            usedPercent: 68,
-                            windowMinutes: 300,
-                            resetsAt: referenceDate.addingTimeInterval(90 * 60)
-                        ),
-                        PlanUsageWindow(
-                            label: "Weekly",
-                            usedPercent: 7,
-                            windowMinutes: 10_080,
-                            resetsAt: referenceDate.addingTimeInterval(
-                                6 * 24 * 3_600
-                            )
-                        )
-                    ],
-                    observedAt: referenceDate
-                )
+                sourceDetail: "Fixture Claude usage"
             ),
             ProviderUsage(
                 id: .gemini,

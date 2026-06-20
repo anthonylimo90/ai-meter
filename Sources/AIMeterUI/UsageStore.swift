@@ -9,10 +9,8 @@ public final class UsageStore {
     private static let autoRefreshKey = "auto-refresh-enabled"
     private static let refreshIntervalKey = "refresh-interval-seconds"
     private static let showMenuBarMetersKey = "show-menu-bar-meters"
-    private static let readingsKey = "last-provider-readings-v2"
+    private static let readingsKey = "last-provider-readings-v3"
     private static let lastUpdatedKey = "last-provider-update"
-    private static let lastClaudeQuotaAttemptKey =
-        "last-claude-quota-attempt"
     @ObservationIgnored
     private var autoRefreshTask: Task<Void, Never>?
     @ObservationIgnored
@@ -23,8 +21,6 @@ public final class UsageStore {
     private var configurationPersistenceTask: Task<Void, Never>?
     @ObservationIgnored
     private var hasStartedAutoRefresh = false
-    @ObservationIgnored
-    private var lastClaudeQuotaAttemptAt: Date?
 
     /// Update mechanism (Sparkle), injected by the app target at launch. Nil in
     /// previews and the snapshot tool.
@@ -127,11 +123,6 @@ public final class UsageStore {
             forKey: Self.lastUpdatedKey
         ) as? Date
         self.hasLoaded = !storedReadings.isEmpty
-        self.lastClaudeQuotaAttemptAt = UserDefaults.standard.object(
-            forKey: Self.lastClaudeQuotaAttemptKey
-        ) as? Date ?? readings.first(where: {
-            $0.id == .claude
-        })?.planUsage?.observedAt
     }
 
     public init(
@@ -147,9 +138,6 @@ public final class UsageStore {
         readings = previewReadings
         self.lastUpdated = lastUpdated
         hasLoaded = true
-        lastClaudeQuotaAttemptAt = previewReadings.first(where: {
-            $0.id == .claude
-        })?.planUsage?.observedAt
     }
 
     public var menuBarTitle: String {
@@ -221,8 +209,8 @@ public final class UsageStore {
         return "No recent compatible usage records found."
     }
 
-    public func refresh(forceClaudeQuota: Bool = true) async {
-        if !forceClaudeQuota, let refreshTask {
+    public func refresh(coalescing: Bool = false) async {
+        if coalescing, let refreshTask {
             await refreshTask.value
             return
         }
@@ -232,10 +220,7 @@ public final class UsageStore {
         refreshGeneration = generation
         let task = Task { [weak self] in
             guard let self else { return }
-            await self.performRefresh(
-                forceClaudeQuota: forceClaudeQuota,
-                generation: generation
-            )
+            await self.performRefresh(generation: generation)
         }
         refreshTask = task
         await task.value
@@ -249,7 +234,7 @@ public final class UsageStore {
             let lastUpdated,
             Date().timeIntervalSince(lastUpdated) < maxAge
         else {
-            await refresh(forceClaudeQuota: false)
+            await refresh(coalescing: true)
             return
         }
     }
@@ -283,7 +268,7 @@ public final class UsageStore {
                     return
                 }
                 guard !Task.isCancelled else { return }
-                await self.refresh(forceClaudeQuota: false)
+                await self.refresh(coalescing: true)
             }
         }
     }
@@ -313,28 +298,10 @@ public final class UsageStore {
         refreshingProviders.contains(provider)
     }
 
-    private func performRefresh(
-        forceClaudeQuota: Bool,
-        generation: UUID
-    ) async {
+    private func performRefresh(generation: UUID) async {
         normalizeResetDates()
         reconcileReadingsWithConfigurations()
         let activeConfigurations = configurations.filter(\.isEnabled)
-        let now = Date()
-        let shouldFetchClaudeQuota = activeConfigurations.contains {
-            $0.id == .claude
-        } && UsageRefreshPolicy.shouldAttemptClaudeQuota(
-            lastAttempt: lastClaudeQuotaAttemptAt,
-            now: now,
-            force: forceClaudeQuota
-        )
-        if shouldFetchClaudeQuota {
-            lastClaudeQuotaAttemptAt = now
-            UserDefaults.standard.set(
-                now,
-                forKey: Self.lastClaudeQuotaAttemptKey
-            )
-        }
 
         isRefreshing = true
         refreshingProviders = Set(activeConfigurations.map(\.id))
@@ -342,16 +309,12 @@ public final class UsageStore {
         var hadWarnings = false
 
         for await result in LocalUsageScanner.results(
-            configurations: activeConfigurations,
-            fetchClaudeQuota: shouldFetchClaudeQuota
+            configurations: activeConfigurations
         ) {
             guard !Task.isCancelled, generation == refreshGeneration else {
                 return
             }
-            merge(
-                result,
-                preservingClaudeQuota: !shouldFetchClaudeQuota
-            )
+            merge(result)
             refreshingProviders.remove(result.provider)
             hadWarnings = hadWarnings
                 || result.availability == .failed
@@ -372,10 +335,7 @@ public final class UsageStore {
         persistReadings()
     }
 
-    func merge(
-        _ result: ScanResult,
-        preservingClaudeQuota: Bool
-    ) {
+    func merge(_ result: ScanResult) {
         guard let configuration = configurations.first(where: {
             $0.id == result.provider && $0.isEnabled
         }) else {
@@ -418,8 +378,7 @@ public final class UsageStore {
         staleProviders.remove(result.provider)
         let planUsage = resolvedPlanUsage(
             result: result,
-            previous: previous,
-            preservingClaudeQuota: preservingClaudeQuota
+            previous: previous
         )
         let reading = ProviderUsage(
             id: configuration.id,
@@ -457,16 +416,14 @@ public final class UsageStore {
 
     private func resolvedPlanUsage(
         result: ScanResult,
-        previous: ProviderUsage?,
-        preservingClaudeQuota: Bool = false
+        previous: ProviderUsage?
     ) -> PlanUsageSnapshot? {
         switch result.planUsageStatus {
         case .measured:
             return result.planUsage?.active()
         case .notRequested:
-            guard result.provider == .claude || preservingClaudeQuota else {
-                return nil
-            }
+            // Preserve a previously measured provider-reported window (e.g.
+            // Codex) between scans that did not re-read it.
             return previous?.planUsage?.active()
         case .unavailable, .failed:
             return nil
@@ -665,7 +622,6 @@ enum UsageRefreshPolicy {
     static let defaultInterval = 300
     static let minimumInterval = 60
     static let lowPowerInterval = 900
-    static let claudeQuotaInterval: TimeInterval = 900
     static let supportedIntervals = [60, 300, 900]
 
     static func normalizedInterval(_ storedInterval: Int) -> Int {
@@ -684,22 +640,5 @@ enum UsageRefreshPolicy {
     ) -> Int {
         let normalized = normalizedInterval(configured)
         return lowPowerMode ? max(normalized, lowPowerInterval) : normalized
-    }
-
-    static func shouldAttemptClaudeQuota(
-        lastAttempt: Date?,
-        now: Date,
-        force: Bool
-    ) -> Bool {
-        if force {
-            return true
-        }
-        guard let lastAttempt else {
-            return true
-        }
-        if lastAttempt > now {
-            return true
-        }
-        return now.timeIntervalSince(lastAttempt) >= claudeQuotaInterval
     }
 }

@@ -96,7 +96,7 @@ public struct SettingsView: View {
 
             settingsHeader(
                 title: "How It Updates",
-                detail: "Local logs follow the selected refresh interval. Claude quota checks run at most every 15 minutes unless you choose Refresh Now. Low Power Mode also limits background refreshes to every 15 minutes."
+                detail: "Local logs follow the selected refresh interval. Low Power Mode limits background refreshes to every 15 minutes."
             )
 
             Label(
@@ -111,7 +111,7 @@ public struct SettingsView: View {
             HStack {
                 Spacer()
                 Button {
-                    Task { await store.refresh(forceClaudeQuota: true) }
+                    Task { await store.refresh() }
                 } label: {
                     Label("Refresh Now", systemImage: "arrow.clockwise")
                 }
@@ -147,7 +147,7 @@ public struct SettingsView: View {
                 Spacer()
 
                 Button {
-                    Task { await store.refresh(forceClaudeQuota: true) }
+                    Task { await store.refresh() }
                 } label: {
                     Label("Refresh Now", systemImage: "arrow.clockwise")
                 }
@@ -176,13 +176,13 @@ public struct SettingsView: View {
             Divider()
 
             Text(
-                "AI Meter reads the local usage folders listed in Provider settings. For Claude quotas, it briefly opens the installed Claude Code client in safe mode and parses only its usage percentages and reset times. AI Meter does not read account credentials."
+                "AI Meter reads only the local usage folders listed in Provider settings. It does not read account credentials and makes no network requests to read usage."
             )
             .font(.body)
             .fixedSize(horizontal: false, vertical: true)
 
             Text(
-                "Codex exposes plan windows in local session records. Claude is read from Claude Code's own usage screen. Providers without trustworthy quota data remain clearly marked as unavailable."
+                "Codex exposes plan windows in local session records, so AI Meter shows its live limits. Other providers, including Claude, do not expose quota in a readable local form, so they show local token totals and any budget you configure."
             )
             .font(.body)
             .foregroundStyle(.secondary)

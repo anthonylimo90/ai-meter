@@ -1,16 +1,15 @@
 # AI Meter
 
 AI Meter is a native macOS menu-bar app that puts your local AI usage in one
-place. It can show live plan limits for Codex and Claude, measure tokens from
-local client records, and track optional personal budgets for providers that do
-not expose quota data.
+place. It can show live plan limits for Codex, measure tokens from local client
+records, and track optional personal budgets for providers that do not expose
+quota data.
 
 ![AI Meter showing provider usage in the macOS menu bar](implementation.png)
 
 ## Highlights
 
-- Live remaining-usage meters for Codex and Claude when their clients expose
-  plan data.
+- Live remaining-usage meters for Codex when its client exposes plan data.
 - Local token totals for OpenAI/Codex, Claude, Gemini, Cursor, and GitHub
   Copilot when compatible records are available.
 - Automatic refresh every 1, 5, or 15 minutes, with battery-aware behavior.
@@ -25,7 +24,6 @@ not expose quota data.
 - macOS 14 Sonoma or later.
 - Apple Silicon or Intel Mac.
 - A supported AI client installed or previously used on this Mac.
-- Claude Code installed and signed in if you want live Claude plan usage.
 
 AI Meter is a menu-bar-only app. It does not appear in the Dock after launch.
 
@@ -76,7 +74,7 @@ token metadata, or it does not publish a trustworthy plan limit.
 | Provider | Local source | What AI Meter can show |
 | --- | --- | --- |
 | OpenAI / Codex | `~/.codex/sessions` | Local tokens plus provider-reported 5-hour and weekly Codex plan windows when present |
-| Claude | `~/.claude/projects` and Claude Code's `/usage` screen | Local tokens plus provider-reported session and weekly plan windows |
+| Claude | `~/.claude/projects` | Local token totals (Claude does not expose plan quota in a readable local form) |
 | Gemini | `~/.gemini/tmp`, `~/.gemini/history` | Local tokens when compatible timestamped metadata is present |
 | Cursor | `~/.cursor`, Cursor's `globalStorage` folder | Local tokens when compatible timestamped metadata is present |
 | GitHub Copilot | Copilot CLI and VS Code `globalStorage` folders | Local tokens when compatible timestamped metadata is present |
@@ -90,7 +88,7 @@ usage. You can add a custom JSON, JSONL, or log folder in Provider settings.
 AI Meter keeps two different measurements separate:
 
 - **Plan usage** is a percentage and reset time reported by the provider's own
-  client. AI Meter currently reads this for Codex and Claude.
+  client. AI Meter reads this for Codex, the one client that records it locally.
 - **Local token usage** is counted from compatible records stored on your Mac.
   It is useful for tracking activity, but it is not necessarily the same as a
   provider's billing or subscription quota.
@@ -116,12 +114,8 @@ pricing page if you use cost estimates for planning.
 
 AI Meter reads only the local folders listed in **Settings > Providers** and any
 extra folder you add. It does not ask for or read provider account credentials,
-and it does not send log contents to an AI Meter service.
-
-To read Claude plan limits, AI Meter briefly starts the installed `claude`
-executable with `--safe-mode`, opens `/usage`, and parses only the percentages,
-reset times, and detected plan name. Claude Code may make its own network
-request while doing this.
+launch other applications, or make network requests to read usage — every
+reading comes from records already on your Mac.
 
 For updates, AI Meter uses [Sparkle](https://sparkle-project.org). When you
 check for updates — or, if you opt in, on Sparkle's periodic schedule — it
@@ -183,18 +177,12 @@ also add the correct folder under **Settings > Providers > Extra folder**.
 The files may not contain timestamped token metadata that AI Meter recognizes.
 This is common for clients that do not expose token-level usage locally.
 
-**Claude tokens appear but its plan limits do not**
+**Claude shows tokens but no plan percentage**
 
-Make sure Claude Code is installed, authenticated, and available at one of:
-
-```text
-~/.local/bin/claude
-/opt/homebrew/bin/claude
-/usr/local/bin/claude
-```
-
-Then choose **Refresh Now**. Automatic Claude quota checks are limited to once
-every 15 minutes, while a manual refresh always requests a fresh reading.
+This is expected. Claude does not expose plan quota (5-hour / weekly limits) in a
+readable local form, so AI Meter shows Claude's local token totals and any budget
+you configure under **Settings > Providers**. Codex is currently the only client
+that records its plan limits locally.
 
 **Refreshes are less frequent than configured**
 

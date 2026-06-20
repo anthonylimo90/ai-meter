@@ -100,95 +100,6 @@ final class TokenLogParserTests: XCTestCase {
         XCTAssertEqual(usage.modelName, "claude-sonnet-4-6")
     }
 
-    func testClaudeUsageProbeParsesSessionAndWeeklyQuota() throws {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "Africa/Nairobi")!
-        let now = calendar.date(
-            from: DateComponents(
-                year: 2026,
-                month: 6,
-                day: 10,
-                hour: 19
-            )
-        )!
-        let output = """
-        Claude Code v2.1.169
-        Claude Max
-        Current session
-        █████████████████████████   50% used
-        Resets 9pm (Africa/Nairobi)
-
-        Current week (all models)
-        ███████▌   15% used
-        Resets Jun 12 at 12pm (Africa/Nairobi)
-        """
-
-        let snapshot = try XCTUnwrap(
-            ClaudeUsageProbe.parse(
-                terminalOutput: output,
-                now: now,
-                calendar: calendar
-            )
-        )
-
-        XCTAssertEqual(snapshot.planName, "Max")
-        XCTAssertEqual(snapshot.windows.count, 2)
-        XCTAssertEqual(snapshot.windows[0].remainingPercent, 50)
-        XCTAssertEqual(snapshot.windows[1].remainingPercent, 85)
-        XCTAssertEqual(
-            calendar.component(.hour, from: snapshot.windows[0].resetsAt),
-            21
-        )
-        XCTAssertEqual(
-            calendar.component(.day, from: snapshot.windows[1].resetsAt),
-            12
-        )
-    }
-
-    func testClaudeUsageProbeParsesTerminalDiffArtifacts() throws {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "Africa/Nairobi")!
-        let now = calendar.date(
-            from: DateComponents(
-                year: 2026,
-                month: 6,
-                day: 12,
-                hour: 14
-            )
-        )!
-        let output = """
-        ClaudeMax
-        Currensession
-        ██████████████████████████████████████████████100%used
-        Rsets 3:20pm(Africa/Nairbi)
-
-        Current week (all modes)
-        ███      6%used
-        ResetsJun19at12pm(Africa/Nairobi)
-        """
-
-        let snapshot = try XCTUnwrap(
-            ClaudeUsageProbe.parse(
-                terminalOutput: output,
-                now: now,
-                calendar: calendar
-            )
-        )
-
-        XCTAssertEqual(snapshot.planName, "Max")
-        XCTAssertEqual(snapshot.windows.count, 2)
-        XCTAssertEqual(snapshot.windows[0].remainingPercent, 0)
-        XCTAssertEqual(snapshot.windows[1].remainingPercent, 94)
-        XCTAssertEqual(
-            calendar.component(.hour, from: snapshot.windows[0].resetsAt),
-            15
-        )
-        XCTAssertEqual(
-            calendar.component(.day, from: snapshot.windows[1].resetsAt),
-            19
-        )
-    }
-
     func testGenericUsageSupportsGeminiMetadata() throws {
         let object: [String: Any] = [
             "id": "gemini-1",
@@ -322,62 +233,23 @@ final class TokenLogParserTests: XCTestCase {
         )
     }
 
-    func testClaudeQuotaAttemptsAreRateLimitedAfterFailure() {
-        let now = Date(timeIntervalSince1970: 1_781_100_000)
-        XCTAssertFalse(
-            UsageRefreshPolicy.shouldAttemptClaudeQuota(
-                lastAttempt: now.addingTimeInterval(-60),
-                now: now,
-                force: false
-            )
-        )
-        XCTAssertTrue(
-            UsageRefreshPolicy.shouldAttemptClaudeQuota(
-                lastAttempt: now.addingTimeInterval(-901),
-                now: now,
-                force: false
-            )
-        )
-        XCTAssertTrue(
-            UsageRefreshPolicy.shouldAttemptClaudeQuota(
-                lastAttempt: now,
-                now: now,
-                force: true
-            )
-        )
-    }
-
-    func testClaudeQuotaIsAvailableWithoutLocalLogFolders() throws {
+    func testClaudeReportsTokensOnlyWithoutPlanQuota() throws {
         let now = Date(timeIntervalSince1970: 1_781_100_000)
         let configuration = configuration(
             id: .claude,
             now: now,
             windowHours: 24
         )
-        let snapshot = PlanUsageSnapshot(
-            source: .providerReported,
-            planName: "Max",
-            windows: [
-                PlanUsageWindow(
-                    label: "5-hour",
-                    usedPercent: 25,
-                    windowMinutes: 300,
-                    resetsAt: now.addingTimeInterval(3_600)
-                )
-            ],
-            observedAt: now
-        )
 
         let result = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [],
-            now: now,
-            claudeUsage: { .measured(snapshot) }
+            now: now
         )
 
-        XCTAssertEqual(result.planUsage, snapshot)
+        // No local folder -> unavailable, and never a provider-reported plan.
+        XCTAssertNil(result.planUsage)
         XCTAssertEqual(result.availability, .unavailable)
-        XCTAssertTrue(result.detail.contains("Provider-reported"))
     }
 
     func testCodexSubtractsPreWindowCumulativeBaseline() throws {
@@ -405,8 +277,7 @@ final class TokenLogParserTests: XCTestCase {
         let result = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
 
         XCTAssertEqual(result.tokens, 240)
@@ -442,8 +313,7 @@ final class TokenLogParserTests: XCTestCase {
         let result = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
 
         XCTAssertEqual(result.tokens, 125)
@@ -474,8 +344,7 @@ final class TokenLogParserTests: XCTestCase {
         let result = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
 
         XCTAssertEqual(result.tokens, 50)
@@ -505,8 +374,7 @@ final class TokenLogParserTests: XCTestCase {
         let result = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [validFile, invalidFile],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
 
         XCTAssertEqual(result.tokens, 75)
@@ -537,8 +405,7 @@ final class TokenLogParserTests: XCTestCase {
         let first = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
         try append(
             try genericRecord(
@@ -551,8 +418,7 @@ final class TokenLogParserTests: XCTestCase {
         let second = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
 
         XCTAssertEqual(first.tokens, 40)
@@ -670,8 +536,7 @@ final class TokenLogParserTests: XCTestCase {
         let result = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
 
         XCTAssertEqual(result.tokens, 88)
@@ -701,8 +566,7 @@ final class TokenLogParserTests: XCTestCase {
         let result = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
 
         XCTAssertEqual(result.tokens, 125)
@@ -725,8 +589,7 @@ final class TokenLogParserTests: XCTestCase {
         let result = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
 
         XCTAssertEqual(result.tokens, 0)
@@ -756,8 +619,7 @@ final class TokenLogParserTests: XCTestCase {
         let result = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
 
         XCTAssertEqual(result.tokens, 75)
@@ -790,15 +652,13 @@ final class TokenLogParserTests: XCTestCase {
         let first = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
         try overwrite(replacement, at: file)
         let second = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
 
         XCTAssertEqual(first.tokens, 40)
@@ -821,8 +681,7 @@ final class TokenLogParserTests: XCTestCase {
         _ = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
         try overwrite(
             try genericRecord(timestamp: now, tokens: 90, id: "new")
@@ -833,8 +692,7 @@ final class TokenLogParserTests: XCTestCase {
         let result = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
 
         XCTAssertEqual(result.tokens, 90)
@@ -856,8 +714,7 @@ final class TokenLogParserTests: XCTestCase {
         _ = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
         let replacement = file
             .deletingLastPathComponent()
@@ -872,8 +729,7 @@ final class TokenLogParserTests: XCTestCase {
         let result = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
 
         XCTAssertEqual(result.tokens, 95)
@@ -896,8 +752,7 @@ final class TokenLogParserTests: XCTestCase {
         let result = LocalUsageScanner.scan(
             configuration: configuration,
             rootsOverride: [file.deletingLastPathComponent(), file],
-            now: now,
-            claudeUsage: { PlanUsageReadResult(status: .notRequested) }
+            now: now
         )
 
         XCTAssertEqual(result.tokens, 250)
@@ -995,46 +850,23 @@ final class TokenLogParserTests: XCTestCase {
     }
 
     @MainActor
-    func testFailedClaudeQuotaAttemptClearsPreviousLivePlan() throws {
+    func testFailedClaudeScanShowsLastKnownTokensWithoutPlan() throws {
         let now = Date()
-        let store = claudeStoreWithLivePlan(now: now)
+        let store = claudeStoreWithTokens(now: now)
         store.merge(
             ScanResult(
                 provider: .claude,
                 tokens: 120,
-                availability: .measured,
-                detail: "Claude project logs: local tokens",
-                planUsageStatus: .failed("Claude Code timed out")
-            ),
-            preservingClaudeQuota: false
+                availability: .failed,
+                detail: "Claude project logs: read error",
+                planUsageStatus: .failed("read error")
+            )
         )
 
         let reading = try XCTUnwrap(
             store.readings.first { $0.id == .claude }
         )
         XCTAssertNil(reading.planUsage)
-        XCTAssertTrue(reading.sourceDetail.contains("timed out"))
-    }
-
-    @MainActor
-    func testSkippedClaudeQuotaAttemptPreservesPreviousLivePlan() throws {
-        let now = Date()
-        let store = claudeStoreWithLivePlan(now: now)
-        store.merge(
-            ScanResult(
-                provider: .claude,
-                tokens: 120,
-                availability: .measured,
-                detail: "Claude project logs: local tokens",
-                planUsageStatus: .notRequested
-            ),
-            preservingClaudeQuota: true
-        )
-
-        let reading = try XCTUnwrap(
-            store.readings.first { $0.id == .claude }
-        )
-        XCTAssertNotNil(reading.planUsage?.active(at: now))
     }
 
     private func configuration(
@@ -1054,7 +886,7 @@ final class TokenLogParserTests: XCTestCase {
     }
 
     @MainActor
-    private func claudeStoreWithLivePlan(now: Date) -> UsageStore {
+    private func claudeStoreWithTokens(now: Date) -> UsageStore {
         let configurations = ProviderConfiguration.defaults(now: now)
         let reading = ProviderUsage(
             id: .claude,
@@ -1063,20 +895,7 @@ final class TokenLogParserTests: XCTestCase {
             tokenLimit: 0,
             resetAt: now.addingTimeInterval(3_600),
             availability: .measured,
-            sourceDetail: "Fixture",
-            planUsage: PlanUsageSnapshot(
-                source: .providerReported,
-                planName: "Max",
-                windows: [
-                    PlanUsageWindow(
-                        label: "5-hour",
-                        usedPercent: 25,
-                        windowMinutes: 300,
-                        resetsAt: now.addingTimeInterval(3_600)
-                    )
-                ],
-                observedAt: now
-            )
+            sourceDetail: "Fixture"
         )
         return UsageStore(
             previewReadings: [reading],

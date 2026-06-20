@@ -97,7 +97,7 @@ private struct PopoverHeader: View {
             Spacer()
 
             Button {
-                Task { await store.refresh(forceClaudeQuota: true) }
+                Task { await store.refresh() }
             } label: {
                 ZStack {
                     Circle()
