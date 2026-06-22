@@ -169,6 +169,7 @@ private struct ProviderUsageList: View {
                     index,
                     reading in
                     ProviderUsageRow(
+                        store: store,
                         reading: reading,
                         isRefreshing: store.isRefreshing(reading.id),
                         isStale: store.staleProviders.contains(reading.id),
@@ -234,10 +235,12 @@ extension MeterPopover {
 }
 
 private struct ProviderUsageRow: View {
+    let store: UsageStore
     let reading: ProviderUsage
     let isRefreshing: Bool
     let isStale: Bool
     let referenceDate: Date?
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         Group {
@@ -295,12 +298,8 @@ private struct ProviderUsageRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
 
-                MeterProgressBar(
-                    fraction: reading.remainingFraction(at: now) ?? 0,
-                    color: reading.id.accentColor,
-                    isUnavailable: reading.remainingFraction(at: now) == nil
-                )
-                .frame(height: 7)
+                meterBar(now: now)
+                    .frame(height: 7)
 
                 if let secondaryWindow = reading.secondaryPlanWindow(at: now) {
                     Text(
@@ -340,6 +339,37 @@ private struct ProviderUsageRow: View {
         .help(helpText)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilitySummary(at: now))
+    }
+
+    @ViewBuilder
+    private func meterBar(now: Date) -> some View {
+        if let fraction = reading.remainingFraction(at: now) {
+            MeterProgressBar(fraction: fraction, color: reading.id.accentColor)
+        } else if reading.isUnavailable {
+            // No local data to meter — show an empty track, no false promise.
+            Capsule()
+                .fill(.black.opacity(0.28))
+        } else {
+            // Tokens are measured but there's no plan quota or budget to meter
+            // against, so let the user set one instead of showing a dead bar.
+            Button {
+                store.selectedSettingsTab = .providers
+                NSApplication.shared.activate(ignoringOtherApps: true)
+                openSettings()
+            } label: {
+                HStack(spacing: 3) {
+                    Text("Set a budget")
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                }
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(reading.id.accentColor)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Set a fallback budget for \(reading.id.name) to meter usage against your plan.")
+        }
     }
 
     private var providerBadge: some View {
@@ -410,7 +440,9 @@ private struct ProviderUsageRow: View {
 
     private func resetText(now: Date = .now) -> String {
         guard reading.remainingPercent(at: now) != nil else {
-            return "Plan usage\nnot exposed"
+            // Genuinely no data vs. just no budget configured: only the former
+            // is "not exposed" — the latter is handled by the Set a budget action.
+            return reading.isUnavailable ? "Plan usage\nnot exposed" : ""
         }
         let resetAt = reading.primaryPlanWindow(at: now)?.resetsAt
             ?? reading.resetAt
@@ -429,7 +461,7 @@ private struct ProviderUsageRow: View {
         case .configuredBudget:
             return "Personal budget"
         case .unavailable:
-            return "Plan limit unavailable"
+            return reading.isUnavailable ? "Plan limit unavailable" : "No budget set"
         }
     }
 
@@ -449,7 +481,6 @@ private struct ProviderUsageRow: View {
 private struct MeterProgressBar: View {
     let fraction: Double
     let color: Color
-    let isUnavailable: Bool
 
     var body: some View {
         GeometryReader { proxy in
@@ -457,7 +488,7 @@ private struct MeterProgressBar: View {
                 Capsule()
                     .fill(.black.opacity(0.28))
                 Capsule()
-                    .fill(isUnavailable ? Color.secondary.opacity(0.18) : color)
+                    .fill(color)
                     .frame(width: max(0, proxy.size.width * fraction))
             }
         }

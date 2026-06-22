@@ -2,6 +2,12 @@ import AppKit
 import SwiftUI
 import AIMeterCore
 
+public enum SettingsTab: Hashable, Sendable {
+    case general
+    case providers
+    case about
+}
+
 public struct SettingsView: View {
     let store: UsageStore
     let snapshotMode: Bool
@@ -15,25 +21,29 @@ public struct SettingsView: View {
     }
 
     public var body: some View {
-        Group {
+        @Bindable var store = store
+        return Group {
             if snapshotMode {
                 generalSettings
             } else {
-                TabView {
+                TabView(selection: $store.selectedSettingsTab) {
                     generalSettings
                         .tabItem {
                             Label("General", systemImage: "slider.horizontal.3")
                         }
+                        .tag(SettingsTab.general)
 
                     providerSettings
                         .tabItem {
                             Label("Providers", systemImage: "square.stack.3d.up")
                         }
+                        .tag(SettingsTab.providers)
 
                     aboutSettings
                         .tabItem {
                             Label("About", systemImage: "info.circle")
                         }
+                        .tag(SettingsTab.about)
                 }
             }
         }
@@ -337,141 +347,156 @@ private struct ProviderConfigurationView: View {
 
     var body: some View {
         GroupBox {
-            DisclosureGroup(isExpanded: $isExpanded) {
-                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-                    GridRow {
-                        Text("Tier")
-                        TextField("Subscription tier", text: $configuration.tier)
-                    }
+            VStack(alignment: .leading, spacing: 14) {
+                header
 
-                    GridRow {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
+                    GridRow(alignment: .top) {
                         Text("Fallback budget")
-                        TextField(
-                            "Tokens",
-                            value: $configuration.tokenLimit,
-                            format: .number.grouping(.never)
-                        )
-                    }
-
-                    GridRow {
-                        Text("Fallback window")
-                        HStack {
+                        VStack(alignment: .leading, spacing: 4) {
                             TextField(
-                                "Hours",
-                                value: $configuration.windowHours,
+                                "Tokens",
+                                value: $configuration.tokenLimit,
                                 format: .number.grouping(.never)
                             )
-                            .frame(width: 90)
-                            Text("hours")
-                                .foregroundStyle(.secondary)
+                            Text(
+                                "Tokens per window to meter usage against. Set this to fill the usage bar when your plan's usage isn't reported automatically."
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         }
                     }
+                }
 
-                    GridRow {
-                        Text("Fallback reset")
-                        DatePicker(
-                            "Next reset",
-                            selection: $configuration.nextResetAt
-                        )
-                        .labelsHidden()
-                    }
+                DisclosureGroup("Advanced", isExpanded: $isExpanded) {
+                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                        GridRow {
+                            Text("Tier")
+                            TextField("Subscription tier", text: $configuration.tier)
+                        }
 
-                    GridRow {
-                        Text("Extra folder")
-                        VStack(alignment: .leading, spacing: 5) {
+                        GridRow {
+                            Text("Fallback window")
                             HStack {
                                 TextField(
-                                    "Optional JSON, JSONL, log file, or folder",
-                                    text: $configuration.customPath
+                                    "Hours",
+                                    value: $configuration.windowHours,
+                                    format: .number.grouping(.never)
                                 )
-                                Button("Browse...") {
-                                    chooseUsagePath()
+                                .frame(width: 90)
+                                Text("hours")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        GridRow {
+                            Text("Fallback reset")
+                            DatePicker(
+                                "Next reset",
+                                selection: $configuration.nextResetAt
+                            )
+                            .labelsHidden()
+                        }
+
+                        GridRow {
+                            Text("Extra folder")
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack {
+                                    TextField(
+                                        "Optional JSON, JSONL, log file, or folder",
+                                        text: $configuration.customPath
+                                    )
+                                    Button("Browse...") {
+                                        chooseUsagePath()
+                                    }
+                                }
+                                pathValidationLabel
+                            }
+                        }
+
+                        GridRow {
+                            Text("Cost estimates")
+                            Toggle(
+                                "Estimate token cost",
+                                isOn: $configuration.costTrackingEnabled
+                            )
+                        }
+
+                        if configuration.costTrackingEnabled {
+                            GridRow {
+                                Text("Default model")
+                                TextField(
+                                    "Model used when records omit one",
+                                    text: $configuration.defaultModelName
+                                )
+                            }
+
+                            GridRow {
+                                Text("USD / 1M")
+                                VStack(alignment: .leading, spacing: 8) {
+                                    RateField(
+                                        title: "Input",
+                                        value: costRate.inputPerMillion
+                                    )
+                                    RateField(
+                                        title: "Output",
+                                        value: costRate.outputPerMillion
+                                    )
+                                    RateField(
+                                        title: "Cached input",
+                                        value: costRate.cachedInputPerMillion
+                                    )
+                                    RateField(
+                                        title: "Cache write",
+                                        value: costRate.cacheWritePerMillion
+                                    )
+                                    RateField(
+                                        title: "Cache read",
+                                        value: costRate.cacheReadPerMillion
+                                    )
                                 }
                             }
-                            pathValidationLabel
-                        }
-                    }
 
-                    GridRow {
-                        Text("Cost estimates")
-                        Toggle(
-                            "Estimate token cost",
-                            isOn: $configuration.costTrackingEnabled
-                        )
-                    }
-
-                    if configuration.costTrackingEnabled {
-                        GridRow {
-                            Text("Default model")
-                            TextField(
-                                "Model used when records omit one",
-                                text: $configuration.defaultModelName
-                            )
-                        }
-
-                        GridRow {
-                            Text("USD / 1M")
-                            VStack(alignment: .leading, spacing: 8) {
-                                RateField(
-                                    title: "Input",
-                                    value: costRate.inputPerMillion
+                            GridRow {
+                                Text("")
+                                Label(
+                                    "Costs are estimates from local records, not provider billing statements.",
+                                    systemImage: "info.circle"
                                 )
-                                RateField(
-                                    title: "Output",
-                                    value: costRate.outputPerMillion
-                                )
-                                RateField(
-                                    title: "Cached input",
-                                    value: costRate.cachedInputPerMillion
-                                )
-                                RateField(
-                                    title: "Cache write",
-                                    value: costRate.cacheWritePerMillion
-                                )
-                                RateField(
-                                    title: "Cache read",
-                                    value: costRate.cacheReadPerMillion
-                                )
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                             }
                         }
 
                         GridRow {
-                            Text("")
-                            Label(
-                                "Costs are estimates from local records, not provider billing statements.",
-                                systemImage: "info.circle"
-                            )
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            Text("Built-in source")
+                            Text(configuration.id.builtInPaths.joined(separator: ", "))
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
                         }
                     }
-
-                    GridRow {
-                        Text("Built-in source")
-                        Text(configuration.id.builtInPaths.joined(separator: ", "))
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                }
-                .padding(.top, 10)
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: configuration.id.symbolName)
-                        .foregroundStyle(configuration.id.accentColor)
-                        .frame(width: 24)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(configuration.id.name)
-                            .font(.headline)
-                        Text(configuration.id.sourceLabel)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Toggle("Enabled", isOn: $configuration.isEnabled)
-                        .labelsHidden()
+                    .padding(.top, 10)
                 }
             }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: configuration.id.symbolName)
+                .foregroundStyle(configuration.id.accentColor)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(configuration.id.name)
+                    .font(.headline)
+                Text(configuration.id.sourceLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Toggle("Enabled", isOn: $configuration.isEnabled)
+                .labelsHidden()
         }
     }
 

@@ -44,6 +44,9 @@ public final class UsageStore {
     var lastUpdated: Date?
     var errorMessage: String?
     var hasLoaded = false
+    /// Which Settings tab to show. Set before calling `openSettings()` to
+    /// deep-link — the popover's "Set a budget" affordance routes here.
+    public var selectedSettingsTab: SettingsTab = .general
     var autoRefreshEnabled: Bool {
         didSet {
             UserDefaults.standard.set(
