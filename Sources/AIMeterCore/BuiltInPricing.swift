@@ -72,51 +72,59 @@ public enum BuiltInPricing {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// Exact `Decimal` from a literal string. Constructing `Decimal` from a
+    /// floating-point literal routes through `Double` and introduces binary
+    /// rounding error (e.g. `0.3`, `0.175`); string parsing is exact, which is
+    /// the whole point of pricing in `Decimal`.
+    private static func dec(_ value: String) -> Decimal {
+        Decimal(string: value) ?? 0
+    }
+
     private static func anthropic(
         _ modelName: String,
-        input: Decimal,
-        output: Decimal,
-        cacheWrite: Decimal,
-        cacheRead: Decimal
+        input: String,
+        output: String,
+        cacheWrite: String,
+        cacheRead: String
     ) -> TokenCostRate {
         TokenCostRate(
             id: "builtin.\(modelName)",
             provider: .claude,
             modelName: modelName,
-            inputPerMillion: input,
-            outputPerMillion: output,
-            cachedInputPerMillion: cacheRead,
-            cacheWritePerMillion: cacheWrite,
-            cacheReadPerMillion: cacheRead,
+            inputPerMillion: dec(input),
+            outputPerMillion: dec(output),
+            cachedInputPerMillion: dec(cacheRead),
+            cacheWritePerMillion: dec(cacheWrite),
+            cacheReadPerMillion: dec(cacheRead),
             updatedAt: lastUpdated,
             sourceNote: "Anthropic list price"
         )
     }
 
     private static let anthropicRates: [TokenCostRate] = [
-        anthropic("claude-fable-5", input: 10, output: 50, cacheWrite: 12.5, cacheRead: 1),
-        anthropic("claude-opus-4-8", input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5),
-        anthropic("claude-opus-4-7", input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5),
-        anthropic("claude-opus-4-6", input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5),
-        anthropic("claude-sonnet-4-6", input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3),
-        anthropic("claude-haiku-4-5", input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.1)
+        anthropic("claude-fable-5", input: "10", output: "50", cacheWrite: "12.5", cacheRead: "1"),
+        anthropic("claude-opus-4-8", input: "5", output: "25", cacheWrite: "6.25", cacheRead: "0.5"),
+        anthropic("claude-opus-4-7", input: "5", output: "25", cacheWrite: "6.25", cacheRead: "0.5"),
+        anthropic("claude-opus-4-6", input: "5", output: "25", cacheWrite: "6.25", cacheRead: "0.5"),
+        anthropic("claude-sonnet-4-6", input: "3", output: "15", cacheWrite: "3.75", cacheRead: "0.3"),
+        anthropic("claude-haiku-4-5", input: "1", output: "5", cacheWrite: "1.25", cacheRead: "0.1")
     ]
 
     private static func openAI(
         _ modelName: String,
-        input: Decimal,
-        output: Decimal,
-        cachedInput: Decimal
+        input: String,
+        output: String,
+        cachedInput: String
     ) -> TokenCostRate {
         TokenCostRate(
             id: "builtin.\(modelName)",
             provider: .openAI,
             modelName: modelName,
-            inputPerMillion: input,
-            outputPerMillion: output,
-            cachedInputPerMillion: cachedInput,
+            inputPerMillion: dec(input),
+            outputPerMillion: dec(output),
+            cachedInputPerMillion: dec(cachedInput),
             cacheWritePerMillion: 0,
-            cacheReadPerMillion: cachedInput,
+            cacheReadPerMillion: dec(cachedInput),
             updatedAt: lastUpdated,
             sourceNote: "OpenAI list price"
         )
@@ -125,30 +133,30 @@ public enum BuiltInPricing {
     // Ordered so that more specific names (e.g. gpt-5.3-codex) win the
     // longest-prefix match over shorter ones (e.g. gpt-5-codex).
     private static let openAIRates: [TokenCostRate] = [
-        openAI("gpt-5.3-codex", input: 1.75, output: 14, cachedInput: 0.175),
-        openAI("gpt-5-codex", input: 1.25, output: 10, cachedInput: 0.125),
-        openAI("gpt-5.5", input: 5, output: 30, cachedInput: 0.5),
-        openAI("gpt-5.4", input: 2.5, output: 15, cachedInput: 0.25)
+        openAI("gpt-5.3-codex", input: "1.75", output: "14", cachedInput: "0.175"),
+        openAI("gpt-5-codex", input: "1.25", output: "10", cachedInput: "0.125"),
+        openAI("gpt-5.5", input: "5", output: "30", cachedInput: "0.5"),
+        openAI("gpt-5.4", input: "2.5", output: "15", cachedInput: "0.25")
     ]
 
     private static func gemini(
         _ modelName: String,
-        input: Decimal,
-        output: Decimal
+        input: String,
+        output: String
     ) -> TokenCostRate {
         TokenCostRate(
             id: "builtin.\(modelName)",
             provider: .gemini,
             modelName: modelName,
-            inputPerMillion: input,
-            outputPerMillion: output,
+            inputPerMillion: dec(input),
+            outputPerMillion: dec(output),
             updatedAt: lastUpdated,
             sourceNote: "Google list price (standard context)"
         )
     }
 
     private static let geminiRates: [TokenCostRate] = [
-        gemini("gemini-2.5-pro", input: 1.25, output: 10),
-        gemini("gemini-2.5-flash", input: 0.3, output: 2.5)
+        gemini("gemini-2.5-pro", input: "1.25", output: "10"),
+        gemini("gemini-2.5-flash", input: "0.3", output: "2.5")
     ]
 }

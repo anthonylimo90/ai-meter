@@ -299,7 +299,7 @@ private struct ProviderUsageRow: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                        .help("Approximate spend over the last day, week, and 30 days using \(reading.modelName ?? "the configured rate"). Provider bills may differ.")
+                        .help(rollupHelpText)
                 }
 
                 Text(planSummary(at: now))
@@ -433,7 +433,28 @@ private struct ProviderUsageRow: View {
             let week = amount(rollup.week),
             let month = amount(rollup.month)
         else { return nil }
-        return "\(day)/day · \(week)/wk · \(month)/mo"
+        // Trailing-window framing ("30d") rather than "/mo" so it doesn't read
+        // as a forward projection — these are actuals over the last 30 days.
+        return "1d \(day) · 7d \(week) · 30d \(month)"
+    }
+
+    /// True when the rollup priced untyped/total-only tokens at the input rate
+    /// because the provider's logs lacked an input/output split — which can
+    /// understate output-heavy spend.
+    private var rollupIsApproximate: Bool {
+        guard let month = reading.rollupBreakdown?.month else { return false }
+        return month.otherTokens > 0 && !month.hasDetailedSplit
+    }
+
+    private var rollupHelpText: String {
+        let model = reading.modelName ?? "the configured rate"
+        var text = "Actual spend over the last 1, 7, and 30 days using "
+            + "\(model). Provider bills may differ."
+        if rollupIsApproximate {
+            text += " This provider logs only total tokens, so usage is priced"
+                + " at the input rate and may understate output-heavy spend."
+        }
+        return text
     }
 
     private var costHelpText: String {

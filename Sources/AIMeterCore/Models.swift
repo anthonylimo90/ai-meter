@@ -407,7 +407,7 @@ public enum TokenCostEstimator {
 /// Token usage bucketed into rolling time windows, used to estimate proximate
 /// spend per day/week/month. Each bucket is inclusive of the shorter ones
 /// (the month bucket contains the week and day tokens).
-public struct CostRollupBreakdown: Equatable, Sendable {
+public struct CostRollupBreakdown: Codable, Equatable, Sendable {
     public var day: TokenBreakdown
     public var week: TokenBreakdown
     public var month: TokenBreakdown
@@ -551,6 +551,11 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
     public let modelName: String?
     public let costEstimate: TokenCostEstimate?
     public let costRollup: TokenCostRollup?
+    /// Token usage bucketed by age, retained so rollup costs can be recomputed
+    /// when the rate changes (mirroring how `tokenBreakdown` backs
+    /// `costEstimate`) and preserved across narrow refreshes that skip the
+    /// wider rollup scan.
+    public let rollupBreakdown: CostRollupBreakdown?
 
     public init(
         id: ProviderID,
@@ -563,7 +568,8 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
         planUsage: PlanUsageSnapshot? = nil,
         modelName: String? = nil,
         costEstimate: TokenCostEstimate? = nil,
-        costRollup: TokenCostRollup? = nil
+        costRollup: TokenCostRollup? = nil,
+        rollupBreakdown: CostRollupBreakdown? = nil
     ) {
         self.init(
             id: id,
@@ -576,7 +582,8 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
             planUsage: planUsage,
             modelName: modelName,
             costEstimate: costEstimate,
-            costRollup: costRollup
+            costRollup: costRollup,
+            rollupBreakdown: rollupBreakdown
         )
     }
 
@@ -591,7 +598,8 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
         planUsage: PlanUsageSnapshot? = nil,
         modelName: String? = nil,
         costEstimate: TokenCostEstimate? = nil,
-        costRollup: TokenCostRollup? = nil
+        costRollup: TokenCostRollup? = nil,
+        rollupBreakdown: CostRollupBreakdown? = nil
     ) {
         self.id = id
         self.tier = tier
@@ -604,6 +612,7 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
         self.modelName = modelName
         self.costEstimate = costEstimate
         self.costRollup = costRollup
+        self.rollupBreakdown = rollupBreakdown
     }
 
     enum CodingKeys: String, CodingKey {
@@ -619,6 +628,7 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
         case modelName
         case costEstimate
         case costRollup
+        case rollupBreakdown
     }
 
     public init(from decoder: Decoder) throws {
@@ -658,6 +668,10 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
             TokenCostRollup.self,
             forKey: .costRollup
         )
+        rollupBreakdown = try container.decodeIfPresent(
+            CostRollupBreakdown.self,
+            forKey: .rollupBreakdown
+        )
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -674,6 +688,7 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
         try container.encodeIfPresent(modelName, forKey: .modelName)
         try container.encodeIfPresent(costEstimate, forKey: .costEstimate)
         try container.encodeIfPresent(costRollup, forKey: .costRollup)
+        try container.encodeIfPresent(rollupBreakdown, forKey: .rollupBreakdown)
     }
 
     public var usedTokens: Int {

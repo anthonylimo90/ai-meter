@@ -6,7 +6,8 @@ public enum LocalUsageScanner {
     private static let maximumLineSize = 8_000_000
 
     public static func results(
-        configurations: [ProviderConfiguration]
+        configurations: [ProviderConfiguration],
+        includeRollup: Bool = true
     ) -> AsyncStream<ScanResult> {
         AsyncStream { continuation in
             let task = Task {
@@ -14,7 +15,10 @@ public enum LocalUsageScanner {
                     for configuration in configurations {
                         group.addTask {
                             guard !Task.isCancelled else { return nil }
-                            return scan(configuration: configuration)
+                            return scan(
+                                configuration: configuration,
+                                includeRollup: includeRollup
+                            )
                         }
                     }
 
@@ -49,6 +53,7 @@ public enum LocalUsageScanner {
         configuration: ProviderConfiguration,
         rootsOverride: [URL]? = nil,
         now: Date = .now,
+        includeRollup: Bool = true,
         claudeStatuslineUsage: @Sendable () -> PlanUsageSnapshot? = {
             ClaudeStatuslineUsage.read()
         }
@@ -61,16 +66,21 @@ public enum LocalUsageScanner {
 
         // Cost rollups need ~30 days of history, wider than the quota window.
         // Pin to a start-of-day boundary so the read window (and the
-        // incremental file cache keyed off it) only shifts once per day.
-        // Codex uses session-maximum semantics that don't sum over time, so it
-        // keeps the narrow quota window and produces no rollup.
+        // incremental file cache keyed off it) only shifts once per day. The
+        // rollup is opt-in per scan (see `includeRollup`) so the frequent
+        // headline refresh can stay on the cheap narrow window. Codex computes
+        // its rollup from a separate, uncached pass (see `codexRollup`) to keep
+        // its session-maximum quota accounting on the narrow window.
         let rollupWindowStart = Calendar.current.date(
             byAdding: .day,
             value: -30,
             to: Calendar.current.startOfDay(for: now)
         ) ?? .distantPast
-        let supportsRollup = configuration.id != .openAI
-        let readWindowStart = supportsRollup
+        // Codex keeps `windowStart` for its quota math but still needs the wide
+        // file inventory so its separate rollup pass can see 30 days of
+        // sessions, so the inventory widens for every provider when the rollup
+        // is requested.
+        let readWindowStart = includeRollup
             ? min(windowStart, rollupWindowStart)
             : windowStart
 
@@ -143,10 +153,19 @@ public enum LocalUsageScanner {
                 after: windowStart,
                 inventoryWarnings: inventory.warningCount
             )
+            var codexTokenScan = scan.tokenScan
+            if includeRollup {
+                let rollup = codexRollup(
+                    files: inventory.files,
+                    windowStart: rollupWindowStart,
+                    now: now
+                )
+                codexTokenScan.rollup = rollup.isEmpty ? nil : rollup
+            }
             let planUsage = scan.planUsage?.active(at: now)
             return scanResult(
                 configuration: configuration,
-                tokenScan: scan.tokenScan,
+                tokenScan: codexTokenScan,
                 planReadResult: PlanUsageReadResult(
                     status: planUsage == nil
                         ? .unavailable("No active Codex plan limits were found")
@@ -498,6 +517,72 @@ public enum LocalUsageScanner {
             warningCount: warningCount,
             modelCounts: modelCounts
         )
+    }
+
+    /// Approximates a Codex day/week/month rollup. Codex logs a cumulative
+    /// per-session token counter rather than additive per-message deltas, so we
+    /// attribute each session's net spend (its in-window maximum minus any
+    /// pre-window baseline, mirroring `CodexFileContribution.windowBreakdown`)
+    /// to the session's most recent timestamp and bucket those by age. Reads
+    /// files directly rather than through the incremental cache, which is keyed
+    /// to the narrow quota window the headline scan uses — this runs on the
+    /// slower rollup cadence, so the extra read is acceptable.
+    private static func codexRollup(
+        files: [URL],
+        windowStart: Date,
+        now: Date
+    ) -> CostRollupBreakdown {
+        let candidateFiles = files.filter {
+            $0.pathExtension.lowercased() == "jsonl"
+        }
+        var sessionRecords: [TokenUsageRecord] = []
+
+        for file in candidateFiles {
+            guard !Task.isCancelled else { break }
+            var baseline = 0
+            var withinMax = TokenBreakdown.zero
+            var newestDate: Date?
+            _ = try? forEachJSONLine(in: file) { object in
+                guard
+                    let breakdown = TokenLogParser.codexSessionBreakdown(
+                        in: object
+                    ),
+                    let date = recordDate(in: object)
+                else { return }
+                if date < windowStart {
+                    baseline = max(baseline, breakdown.totalTokens)
+                } else {
+                    if breakdown.totalTokens > withinMax.totalTokens
+                        || (breakdown.totalTokens == withinMax.totalTokens
+                            && breakdown.splitTokenCount
+                                > withinMax.splitTokenCount) {
+                        withinMax = breakdown
+                    }
+                    if newestDate == nil || date > newestDate! {
+                        newestDate = date
+                    }
+                }
+            }
+
+            guard let newestDate else { continue }
+            let delta = max(withinMax.totalTokens - baseline, 0)
+            let sessionBreakdown: TokenBreakdown
+            if baseline == 0, withinMax.hasDetailedSplit {
+                sessionBreakdown = withinMax
+            } else {
+                sessionBreakdown = .aggregate(delta)
+            }
+            guard sessionBreakdown.totalTokens > 0 else { continue }
+            sessionRecords.append(
+                TokenUsageRecord(
+                    breakdown: sessionBreakdown,
+                    modelName: nil,
+                    date: newestDate
+                )
+            )
+        }
+
+        return costRollup(from: sessionRecords, now: now)
     }
 
     /// Builds a `TokenScan` from deduplicated dated records collected over the

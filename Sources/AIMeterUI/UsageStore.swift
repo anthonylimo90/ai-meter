@@ -11,6 +11,13 @@ public final class UsageStore {
     private static let showMenuBarMetersKey = "show-menu-bar-meters"
     private static let readingsKey = "last-provider-readings-v3"
     private static let lastUpdatedKey = "last-provider-update"
+    private static let lastRollupKey = "last-cost-rollup-update"
+    /// Cost rollups read ~30 days of logs, far more than the headline quota
+    /// scan, so they run on this slower cadence; the previous buckets are
+    /// preserved between rollup passes.
+    private static let rollupMinInterval: TimeInterval = 3_600
+    @ObservationIgnored
+    private var lastRollupAt: Date?
     @ObservationIgnored
     private var autoRefreshTask: Task<Void, Never>?
     @ObservationIgnored
@@ -128,6 +135,9 @@ public final class UsageStore {
         }
         self.lastUpdated = UserDefaults.standard.object(
             forKey: Self.lastUpdatedKey
+        ) as? Date
+        self.lastRollupAt = UserDefaults.standard.object(
+            forKey: Self.lastRollupKey
         ) as? Date
         self.hasLoaded = !storedReadings.isEmpty
         self.claudeStatuslineEnabled = ClaudeStatuslineInstaller.isEnabled()
@@ -346,8 +356,15 @@ public final class UsageStore {
         errorMessage = nil
         var hadWarnings = false
 
+        // Recompute the wide day/week/month rollup only on the slow cadence (or
+        // when we have none yet); narrow refreshes preserve the last buckets.
+        let includeRollup = lastRollupAt.map {
+            Date().timeIntervalSince($0) >= Self.rollupMinInterval
+        } ?? true
+
         for await result in LocalUsageScanner.results(
-            configurations: activeConfigurations
+            configurations: activeConfigurations,
+            includeRollup: includeRollup
         ) {
             guard !Task.isCancelled, generation == refreshGeneration else {
                 return
@@ -369,6 +386,10 @@ public final class UsageStore {
             ? "Some local usage records could not be read."
             : nil
         lastUpdated = .now
+        if includeRollup {
+            lastRollupAt = .now
+            UserDefaults.standard.set(lastRollupAt, forKey: Self.lastRollupKey)
+        }
         hasLoaded = true
         persistReadings()
     }
@@ -404,7 +425,12 @@ public final class UsageStore {
                     modelName: previous.modelName,
                     configuration: configuration
                 ),
-                costRollup: previous.costRollup
+                costRollup: Self.costRollup(
+                    for: previous.rollupBreakdown,
+                    modelName: previous.modelName,
+                    configuration: configuration
+                ),
+                rollupBreakdown: previous.rollupBreakdown
             )
             if let index = readings.firstIndex(where: {
                 $0.id == result.provider
@@ -419,6 +445,14 @@ public final class UsageStore {
             result: result,
             previous: previous
         )
+        let modelName = Self.resolvedModelName(
+            scannedModelName: result.modelName,
+            configuration: configuration
+        )
+        // A narrow refresh omits the wide rollup scan; keep the last computed
+        // buckets so the day/week/month line doesn't blink out between the
+        // slower rollup passes.
+        let rollupBreakdown = result.rollup ?? previous?.rollupBreakdown
         let reading = ProviderUsage(
             id: configuration.id,
             tier: planUsage?.planName ?? configuration.tier,
@@ -429,26 +463,18 @@ public final class UsageStore {
             availability: result.availability,
             sourceDetail: sourceDetail(for: result),
             planUsage: planUsage,
-            modelName: Self.resolvedModelName(
-                scannedModelName: result.modelName,
-                configuration: configuration
-            ),
+            modelName: modelName,
             costEstimate: Self.costEstimate(
                 for: result.tokenBreakdown,
-                modelName: Self.resolvedModelName(
-                    scannedModelName: result.modelName,
-                    configuration: configuration
-                ),
+                modelName: modelName,
                 configuration: configuration
             ),
             costRollup: Self.costRollup(
-                for: result.rollup,
-                modelName: Self.resolvedModelName(
-                    scannedModelName: result.modelName,
-                    configuration: configuration
-                ),
+                for: rollupBreakdown,
+                modelName: modelName,
                 configuration: configuration
-            )
+            ),
+            rollupBreakdown: rollupBreakdown
         )
         if let index = readings.firstIndex(where: { $0.id == result.provider }) {
             readings[index] = reading
@@ -530,7 +556,12 @@ public final class UsageStore {
                     modelName: previous.modelName,
                     configuration: configuration
                 ),
-                costRollup: previous.costRollup
+                costRollup: Self.costRollup(
+                    for: previous.rollupBreakdown,
+                    modelName: previous.modelName,
+                    configuration: configuration
+                ),
+                rollupBreakdown: previous.rollupBreakdown
             )
         }
         refreshingProviders.formIntersection(enabledIDs)
@@ -585,7 +616,8 @@ public final class UsageStore {
                 planUsage: planUsage,
                 modelName: reading.modelName,
                 costEstimate: reading.costEstimate,
-                costRollup: reading.costRollup
+                costRollup: reading.costRollup,
+                rollupBreakdown: reading.rollupBreakdown
             )
         }
         guard let data = try? JSONEncoder().encode(sanitized) else { return }

@@ -1162,6 +1162,112 @@ final class TokenLogParserTests: XCTestCase {
         XCTAssertEqual(result.tokens, 100)
     }
 
+    func testNarrowScanSkipsRollupAndCostsLessBreadth() throws {
+        let now = Date(timeIntervalSince1970: 1_781_100_000)
+        let configuration = configuration(id: .gemini, now: now, windowHours: 2)
+        let file = try temporaryFile(
+            named: "gemini.jsonl",
+            lines: [
+                try genericRecord(
+                    timestamp: now.addingTimeInterval(-3 * 86_400),
+                    tokens: 500,
+                    id: "week"
+                )
+            ]
+        )
+
+        // includeRollup: false is the cheap headline path — no rollup computed.
+        let result = LocalUsageScanner.scan(
+            configuration: configuration,
+            rootsOverride: [file],
+            now: now,
+            includeRollup: false
+        )
+        XCTAssertNil(result.rollup)
+    }
+
+    func testCodexProducesSessionBucketedRollup() throws {
+        let now = Date(timeIntervalSince1970: 1_781_100_000)
+        let configuration = configuration(id: .openAI, now: now, windowHours: 2)
+        // Each file is a separate Codex session; its net spend is attributed to
+        // the session's newest timestamp and bucketed by age.
+        let recent = try temporaryFile(
+            named: "session-recent.jsonl",
+            lines: [
+                try codexRecord(
+                    timestamp: now.addingTimeInterval(-12 * 3_600),
+                    totalTokens: 100
+                )
+            ]
+        )
+        let week = try temporaryFile(
+            named: "session-week.jsonl",
+            lines: [
+                try codexRecord(
+                    timestamp: now.addingTimeInterval(-3 * 86_400),
+                    totalTokens: 200
+                )
+            ]
+        )
+        let month = try temporaryFile(
+            named: "session-month.jsonl",
+            lines: [
+                try codexRecord(
+                    timestamp: now.addingTimeInterval(-15 * 86_400),
+                    totalTokens: 400
+                )
+            ]
+        )
+
+        let result = LocalUsageScanner.scan(
+            configuration: configuration,
+            rootsOverride: [recent, week, month],
+            now: now
+        )
+
+        let rollup = try XCTUnwrap(result.rollup)
+        XCTAssertEqual(rollup.day.totalTokens, 100)
+        XCTAssertEqual(rollup.week.totalTokens, 300)
+        XCTAssertEqual(rollup.month.totalTokens, 700)
+    }
+
+    @MainActor
+    func testCustomRateOverridesBuiltInPricing() throws {
+        let now = Date(timeIntervalSince1970: 1_781_100_000)
+        var configurations = ProviderConfiguration.defaults(now: now)
+        let index = configurations.firstIndex { $0.id == .claude }!
+        configurations[index].costTrackingEnabled = true
+        configurations[index].customRates = [
+            TokenCostRate(
+                id: "custom-opus",
+                provider: .claude,
+                modelName: "claude-opus-4-8",
+                inputPerMillion: 99,  // distinct from the $5 built-in list price
+                outputPerMillion: 0,
+                isEnabled: true
+            )
+        ]
+
+        let store = UsageStore(
+            previewReadings: [],
+            previewConfigurations: configurations,
+            lastUpdated: now
+        )
+        store.merge(
+            ScanResult(
+                provider: .claude,
+                tokenBreakdown: TokenBreakdown(inputTokens: 1_000_000),
+                availability: .measured,
+                detail: "Fixture",
+                modelName: "claude-opus-4-8"
+            )
+        )
+
+        let reading = try XCTUnwrap(store.readings.first { $0.id == .claude })
+        // 1M input tokens at the custom $99/1M rate, not the $5 built-in.
+        XCTAssertEqual(reading.costEstimate?.estimatedAmount, 99)
+    }
+
     private func configuration(
         id: ProviderID,
         now: Date,

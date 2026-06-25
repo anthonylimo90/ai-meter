@@ -466,6 +466,18 @@ private struct ProviderConfigurationView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             }
+
+                            if hasBuiltInPricing {
+                                GridRow {
+                                    Text("")
+                                    Label(
+                                        "Models without a rate above use built-in list prices (as of \(builtInPricingDate)). Override any model by entering a rate.",
+                                        systemImage: "tag"
+                                    )
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                }
+                            }
                         }
 
                         GridRow {
@@ -498,6 +510,17 @@ private struct ProviderConfigurationView: View {
             Toggle("Enabled", isOn: $configuration.isEnabled)
                 .labelsHidden()
         }
+    }
+
+    private var hasBuiltInPricing: Bool {
+        BuiltInPricing.rates.contains { $0.provider == configuration.id }
+    }
+
+    private var builtInPricingDate: String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter.string(from: BuiltInPricing.lastUpdated)
     }
 
     private var costRate: Binding<TokenCostRate> {
