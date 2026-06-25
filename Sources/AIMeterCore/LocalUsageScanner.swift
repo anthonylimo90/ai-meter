@@ -59,13 +59,28 @@ public enum LocalUsageScanner {
             to: configuration.nextResetAt
         ) ?? .distantPast
 
+        // Cost rollups need ~30 days of history, wider than the quota window.
+        // Pin to a start-of-day boundary so the read window (and the
+        // incremental file cache keyed off it) only shifts once per day.
+        // Codex uses session-maximum semantics that don't sum over time, so it
+        // keeps the narrow quota window and produces no rollup.
+        let rollupWindowStart = Calendar.current.date(
+            byAdding: .day,
+            value: -30,
+            to: Calendar.current.startOfDay(for: now)
+        ) ?? .distantPast
+        let supportsRollup = configuration.id != .openAI
+        let readWindowStart = supportsRollup
+            ? min(windowStart, rollupWindowStart)
+            : windowStart
+
         let roots = (rootsOverride ?? resolvedRoots(for: configuration))
             .map { UsagePathResolver.canonicalURL(for: $0.path) }
         let inventory: UsageFileInventory
         do {
             inventory = try DirectoryInventoryCache.inventory(
                 in: roots,
-                modifiedAfter: windowStart
+                modifiedAfter: readWindowStart
             )
         } catch {
             return ScanResult(
@@ -88,7 +103,9 @@ public enum LocalUsageScanner {
             }
             let tokenScan = scanClaude(
                 files: inventory.files,
-                after: windowStart,
+                after: readWindowStart,
+                quotaWindowStart: windowStart,
+                now: now,
                 inventoryWarnings: inventory.warningCount
             )
             // Plan quota comes from Claude Code's status-line `rate_limits`,
@@ -150,7 +167,9 @@ public enum LocalUsageScanner {
             let tokenScan = scanGeneric(
                 files: inventory.files,
                 provider: configuration.id,
-                after: windowStart,
+                after: readWindowStart,
+                quotaWindowStart: windowStart,
+                now: now,
                 inventoryWarnings: inventory.warningCount
             )
             return scanResult(
@@ -301,7 +320,8 @@ public enum LocalUsageScanner {
             planUsage: planUsage,
             planUsageStatus: planReadResult.status,
             hasWarnings: tokenScan.failedFiles > 0 || tokenScan.warningCount > 0,
-            modelName: tokenScan.modelName
+            modelName: tokenScan.modelName,
+            rollup: tokenScan.rollup
         )
     }
 
@@ -364,9 +384,11 @@ public enum LocalUsageScanner {
     private static func scanClaude(
         files: [URL],
         after windowStart: Date,
+        quotaWindowStart: Date,
+        now: Date,
         inventoryWarnings: Int
     ) -> TokenScan {
-        var messageTotals: [String: TokenBreakdown] = [:]
+        var records: [String: TokenUsageRecord] = [:]
         var modelCounts: [String: Int] = [:]
         var readableFiles = 0
         var failedFiles = 0
@@ -384,9 +406,9 @@ public enum LocalUsageScanner {
                     windowStart: windowStart
                 )
                 for (key, record) in contribution.records {
-                    messageTotals[key] = preferredBreakdown(
-                        current: messageTotals[key],
-                        candidate: record.breakdown
+                    records[key] = preferredRecord(
+                        current: records[key],
+                        candidate: record
                     )
                     if let modelName = record.modelName {
                         modelCounts[modelName, default: 0] += 1
@@ -399,13 +421,15 @@ public enum LocalUsageScanner {
             }
         }
 
-        return TokenScan(
-            breakdown: messageTotals.values.reduce(.zero, +),
+        return tokenScan(
+            records: records,
+            quotaWindowStart: quotaWindowStart,
+            now: now,
             candidateFiles: candidateFiles.count,
             readableFiles: readableFiles,
             failedFiles: failedFiles,
             warningCount: warningCount,
-            modelName: mostCommonModel(in: modelCounts)
+            modelCounts: modelCounts
         )
     }
 
@@ -413,9 +437,11 @@ public enum LocalUsageScanner {
         files: [URL],
         provider: ProviderID,
         after windowStart: Date,
+        quotaWindowStart: Date,
+        now: Date,
         inventoryWarnings: Int
     ) -> TokenScan {
-        var records: [String: TokenBreakdown] = [:]
+        var records: [String: TokenUsageRecord] = [:]
         var modelCounts: [String: Int] = [:]
         var readableFiles = 0
         var failedFiles = 0
@@ -432,9 +458,9 @@ public enum LocalUsageScanner {
                         windowStart: windowStart
                     )
                     for (key, record) in contribution.records {
-                        records[key] = preferredBreakdown(
+                        records[key] = preferredRecord(
                             current: records[key],
-                            candidate: record.breakdown
+                            candidate: record
                         )
                         if let modelName = record.modelName {
                             modelCounts[modelName, default: 0] += 1
@@ -447,9 +473,9 @@ public enum LocalUsageScanner {
                         windowStart: windowStart
                     )
                     for (key, record) in contribution.records {
-                        records[key] = preferredBreakdown(
+                        records[key] = preferredRecord(
                             current: records[key],
-                            candidate: record.breakdown
+                            candidate: record
                         )
                         if let modelName = record.modelName {
                             modelCounts[modelName, default: 0] += 1
@@ -462,13 +488,44 @@ public enum LocalUsageScanner {
             }
         }
 
-        return TokenScan(
-            breakdown: records.values.reduce(.zero, +),
+        return tokenScan(
+            records: records,
+            quotaWindowStart: quotaWindowStart,
+            now: now,
             candidateFiles: files.count,
             readableFiles: readableFiles,
             failedFiles: failedFiles,
             warningCount: warningCount,
-            modelName: mostCommonModel(in: modelCounts)
+            modelCounts: modelCounts
+        )
+    }
+
+    /// Builds a `TokenScan` from deduplicated dated records collected over the
+    /// (wide) read window: the headline `breakdown` is summed over the
+    /// configured quota window, while `rollup` buckets the full set by age.
+    private static func tokenScan(
+        records: [String: TokenUsageRecord],
+        quotaWindowStart: Date,
+        now: Date,
+        candidateFiles: Int,
+        readableFiles: Int,
+        failedFiles: Int,
+        warningCount: Int,
+        modelCounts: [String: Int]
+    ) -> TokenScan {
+        let quotaBreakdown = records.values
+            .filter { ($0.date ?? .distantPast) >= quotaWindowStart }
+            .reduce(TokenBreakdown.zero) { $0 + $1.breakdown }
+        let rollup = costRollup(from: Array(records.values), now: now)
+
+        return TokenScan(
+            breakdown: quotaBreakdown,
+            candidateFiles: candidateFiles,
+            readableFiles: readableFiles,
+            failedFiles: failedFiles,
+            warningCount: warningCount,
+            modelName: mostCommonModel(in: modelCounts),
+            rollup: rollup.isEmpty ? nil : rollup
         )
     }
 
@@ -489,7 +546,8 @@ public enum LocalUsageScanner {
                     current: records[key],
                     candidate: TokenUsageRecord(
                         breakdown: usage.breakdown,
-                        modelName: usage.modelName
+                        modelName: usage.modelName,
+                        date: date
                     )
                 )
             }
@@ -647,7 +705,16 @@ private func preferredRecord(
         candidate: candidate.breakdown
     )
     let modelName = candidate.modelName ?? current.modelName
-    return TokenUsageRecord(breakdown: breakdown, modelName: modelName)
+    // Records sharing a key are the same logical message; keep the most recent
+    // timestamp so rolling-window bucketing reflects when usage occurred.
+    let date: Date?
+    switch (current.date, candidate.date) {
+    case let (lhs?, rhs?):
+        date = max(lhs, rhs)
+    default:
+        date = candidate.date ?? current.date
+    }
+    return TokenUsageRecord(breakdown: breakdown, modelName: modelName, date: date)
 }
 
 private func mostCommonModel(in counts: [String: Int]) -> String? {
@@ -669,6 +736,31 @@ private struct TokenScan: Sendable {
     let failedFiles: Int
     let warningCount: Int
     let modelName: String?
+    var rollup: CostRollupBreakdown? = nil
+}
+
+/// Sums dated usage records into rolling day/week/month buckets relative to
+/// `now`. Records without a timestamp are ignored for rollup purposes.
+private func costRollup(
+    from records: [TokenUsageRecord],
+    now: Date
+) -> CostRollupBreakdown {
+    let dayCutoff = now.addingTimeInterval(-86_400)
+    let weekCutoff = now.addingTimeInterval(-7 * 86_400)
+    let monthCutoff = now.addingTimeInterval(-30 * 86_400)
+
+    var rollup = CostRollupBreakdown()
+    for record in records {
+        guard let date = record.date, date >= monthCutoff else { continue }
+        rollup.month += record.breakdown
+        if date >= weekCutoff {
+            rollup.week += record.breakdown
+        }
+        if date >= dayCutoff {
+            rollup.day += record.breakdown
+        }
+    }
+    return rollup
 }
 
 private struct UsageFileInventory: Sendable {
@@ -846,6 +938,9 @@ private struct TokenFileContribution: Sendable {
 private struct TokenUsageRecord: Sendable {
     var breakdown: TokenBreakdown
     var modelName: String?
+    /// Timestamp of the record, retained so usage can be bucketed into
+    /// rolling day/week/month windows for cost rollups.
+    var date: Date?
 }
 
 private enum FileContribution: Sendable {
@@ -1013,7 +1108,8 @@ private enum IncrementalFileCache {
                     current: contribution.records[key],
                     candidate: TokenUsageRecord(
                         breakdown: usage.breakdown,
-                        modelName: usage.modelName
+                        modelName: usage.modelName,
+                        date: date
                     )
                 )
             }

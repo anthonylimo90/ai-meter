@@ -103,7 +103,7 @@ public struct ProviderConfiguration: Codable, Identifiable, Equatable, Sendable 
         nextResetAt: Date,
         customPath: String,
         defaultModelName: String = "",
-        costTrackingEnabled: Bool = false,
+        costTrackingEnabled: Bool = true,
         customRates: [TokenCostRate] = []
     ) {
         self.id = id
@@ -220,7 +220,7 @@ public struct ProviderConfiguration: Codable, Identifiable, Equatable, Sendable 
         costTrackingEnabled = try container.decodeIfPresent(
             Bool.self,
             forKey: .costTrackingEnabled
-        ) ?? false
+        ) ?? true
         customRates = try container.decodeIfPresent(
             [TokenCostRate].self,
             forKey: .customRates
@@ -404,6 +404,46 @@ public enum TokenCostEstimator {
     }
 }
 
+/// Token usage bucketed into rolling time windows, used to estimate proximate
+/// spend per day/week/month. Each bucket is inclusive of the shorter ones
+/// (the month bucket contains the week and day tokens).
+public struct CostRollupBreakdown: Equatable, Sendable {
+    public var day: TokenBreakdown
+    public var week: TokenBreakdown
+    public var month: TokenBreakdown
+
+    public init(
+        day: TokenBreakdown = .zero,
+        week: TokenBreakdown = .zero,
+        month: TokenBreakdown = .zero
+    ) {
+        self.day = day
+        self.week = week
+        self.month = month
+    }
+
+    public var isEmpty: Bool {
+        month.totalTokens == 0
+    }
+}
+
+/// Estimated cost over rolling day/week/month windows.
+public struct TokenCostRollup: Codable, Equatable, Sendable {
+    public var day: TokenCostEstimate?
+    public var week: TokenCostEstimate?
+    public var month: TokenCostEstimate?
+
+    public init(
+        day: TokenCostEstimate?,
+        week: TokenCostEstimate?,
+        month: TokenCostEstimate?
+    ) {
+        self.day = day
+        self.week = week
+        self.month = month
+    }
+}
+
 public enum UsageAvailability: String, Codable, Sendable {
     case measured
     case unavailable
@@ -510,6 +550,7 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
     public let planUsage: PlanUsageSnapshot?
     public let modelName: String?
     public let costEstimate: TokenCostEstimate?
+    public let costRollup: TokenCostRollup?
 
     public init(
         id: ProviderID,
@@ -521,7 +562,8 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
         sourceDetail: String,
         planUsage: PlanUsageSnapshot? = nil,
         modelName: String? = nil,
-        costEstimate: TokenCostEstimate? = nil
+        costEstimate: TokenCostEstimate? = nil,
+        costRollup: TokenCostRollup? = nil
     ) {
         self.init(
             id: id,
@@ -533,7 +575,8 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
             sourceDetail: sourceDetail,
             planUsage: planUsage,
             modelName: modelName,
-            costEstimate: costEstimate
+            costEstimate: costEstimate,
+            costRollup: costRollup
         )
     }
 
@@ -547,7 +590,8 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
         sourceDetail: String,
         planUsage: PlanUsageSnapshot? = nil,
         modelName: String? = nil,
-        costEstimate: TokenCostEstimate? = nil
+        costEstimate: TokenCostEstimate? = nil,
+        costRollup: TokenCostRollup? = nil
     ) {
         self.id = id
         self.tier = tier
@@ -559,6 +603,7 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
         self.planUsage = planUsage
         self.modelName = modelName
         self.costEstimate = costEstimate
+        self.costRollup = costRollup
     }
 
     enum CodingKeys: String, CodingKey {
@@ -573,6 +618,7 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
         case planUsage
         case modelName
         case costEstimate
+        case costRollup
     }
 
     public init(from decoder: Decoder) throws {
@@ -608,6 +654,10 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
             TokenCostEstimate.self,
             forKey: .costEstimate
         )
+        costRollup = try container.decodeIfPresent(
+            TokenCostRollup.self,
+            forKey: .costRollup
+        )
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -623,6 +673,7 @@ public struct ProviderUsage: Codable, Equatable, Identifiable, Sendable {
         try container.encodeIfPresent(planUsage, forKey: .planUsage)
         try container.encodeIfPresent(modelName, forKey: .modelName)
         try container.encodeIfPresent(costEstimate, forKey: .costEstimate)
+        try container.encodeIfPresent(costRollup, forKey: .costRollup)
     }
 
     public var usedTokens: Int {
@@ -711,6 +762,7 @@ public struct ScanResult: Sendable {
     public let planUsageStatus: PlanUsageReadStatus
     public let hasWarnings: Bool
     public let modelName: String?
+    public let rollup: CostRollupBreakdown?
 
     public init(
         provider: ProviderID,
@@ -720,7 +772,8 @@ public struct ScanResult: Sendable {
         planUsage: PlanUsageSnapshot? = nil,
         planUsageStatus: PlanUsageReadStatus = .notRequested,
         hasWarnings: Bool = false,
-        modelName: String? = nil
+        modelName: String? = nil,
+        rollup: CostRollupBreakdown? = nil
     ) {
         self.init(
             provider: provider,
@@ -730,7 +783,8 @@ public struct ScanResult: Sendable {
             planUsage: planUsage,
             planUsageStatus: planUsageStatus,
             hasWarnings: hasWarnings,
-            modelName: modelName
+            modelName: modelName,
+            rollup: rollup
         )
     }
 
@@ -742,7 +796,8 @@ public struct ScanResult: Sendable {
         planUsage: PlanUsageSnapshot? = nil,
         planUsageStatus: PlanUsageReadStatus = .notRequested,
         hasWarnings: Bool = false,
-        modelName: String? = nil
+        modelName: String? = nil,
+        rollup: CostRollupBreakdown? = nil
     ) {
         self.provider = provider
         self.tokenBreakdown = tokenBreakdown
@@ -752,6 +807,7 @@ public struct ScanResult: Sendable {
         self.planUsageStatus = planUsageStatus
         self.hasWarnings = hasWarnings
         self.modelName = modelName
+        self.rollup = rollup
     }
 
     public var tokens: Int {

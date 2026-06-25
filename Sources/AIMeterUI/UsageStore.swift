@@ -403,7 +403,8 @@ public final class UsageStore {
                     for: previous.tokenBreakdown,
                     modelName: previous.modelName,
                     configuration: configuration
-                )
+                ),
+                costRollup: previous.costRollup
             )
             if let index = readings.firstIndex(where: {
                 $0.id == result.provider
@@ -434,6 +435,14 @@ public final class UsageStore {
             ),
             costEstimate: Self.costEstimate(
                 for: result.tokenBreakdown,
+                modelName: Self.resolvedModelName(
+                    scannedModelName: result.modelName,
+                    configuration: configuration
+                ),
+                configuration: configuration
+            ),
+            costRollup: Self.costRollup(
+                for: result.rollup,
                 modelName: Self.resolvedModelName(
                     scannedModelName: result.modelName,
                     configuration: configuration
@@ -520,7 +529,8 @@ public final class UsageStore {
                     for: previous.tokenBreakdown,
                     modelName: previous.modelName,
                     configuration: configuration
-                )
+                ),
+                costRollup: previous.costRollup
             )
         }
         refreshingProviders.formIntersection(enabledIDs)
@@ -574,7 +584,8 @@ public final class UsageStore {
                 sourceDetail: reading.sourceDetail,
                 planUsage: planUsage,
                 modelName: reading.modelName,
-                costEstimate: reading.costEstimate
+                costEstimate: reading.costEstimate,
+                costRollup: reading.costRollup
             )
         }
         guard let data = try? JSONEncoder().encode(sanitized) else { return }
@@ -637,6 +648,32 @@ public final class UsageStore {
         )
     }
 
+    private static func costRollup(
+        for rollup: CostRollupBreakdown?,
+        modelName: String?,
+        configuration: ProviderConfiguration
+    ) -> TokenCostRollup? {
+        guard configuration.costTrackingEnabled, let rollup else { return nil }
+        let rate = rate(for: modelName, configuration: configuration)
+        func estimate(_ breakdown: TokenBreakdown) -> TokenCostEstimate? {
+            TokenCostEstimator.estimate(
+                breakdown: breakdown,
+                rate: rate,
+                modelName: modelName
+            )
+        }
+        let result = TokenCostRollup(
+            day: estimate(rollup.day),
+            week: estimate(rollup.week),
+            month: estimate(rollup.month)
+        )
+        // Nothing worth showing if every bucket is empty.
+        if result.day == nil, result.week == nil, result.month == nil {
+            return nil
+        }
+        return result
+    }
+
     private static func rate(
         for modelName: String?,
         configuration: ProviderConfiguration
@@ -646,12 +683,22 @@ public final class UsageStore {
         }
         if let modelName {
             let normalized = modelName.lowercased()
+            // A user's custom rate for this exact model always wins.
             if let exact = enabledRates.first(where: {
                 $0.modelName.lowercased() == normalized
             }) {
                 return exact
             }
+            // Otherwise fall back to the bundled list price for the model.
+            if let builtIn = BuiltInPricing.rate(
+                for: configuration.id,
+                modelName: modelName
+            ) {
+                return builtIn
+            }
         }
+        // No model match: prefer any custom rate the user configured, else
+        // there is no sensible bundled default to guess at.
         return enabledRates.first
     }
 }

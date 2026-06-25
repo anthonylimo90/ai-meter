@@ -293,6 +293,15 @@ private struct ProviderUsageRow: View {
                         .help(costHelpText)
                 }
 
+                if let rollupText {
+                    Text(rollupText)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .help("Approximate spend over the last day, week, and 30 days using \(reading.modelName ?? "the configured rate"). Provider bills may differ.")
+                }
+
                 Text(planSummary(at: now))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -406,6 +415,25 @@ private struct ProviderUsageRow: View {
             return "Cost unavailable"
         }
         return "Est. \(estimate.estimatedAmount.currencyString(code: estimate.currencyCode))"
+    }
+
+    private var rollupText: String? {
+        guard let rollup = reading.costRollup else { return nil }
+        func amount(_ estimate: TokenCostEstimate?) -> String? {
+            guard
+                let estimate,
+                estimate.missingPricingReason == nil
+            else { return nil }
+            return estimate.estimatedAmount.currencyString(
+                code: estimate.currencyCode
+            )
+        }
+        guard
+            let day = amount(rollup.day),
+            let week = amount(rollup.week),
+            let month = amount(rollup.month)
+        else { return nil }
+        return "\(day)/day · \(week)/wk · \(month)/mo"
     }
 
     private var costHelpText: String {

@@ -658,7 +658,9 @@ final class TokenLogParserTests: XCTestCase {
         XCTAssertNil(decoded.costEstimate)
     }
 
-    func testOldProviderConfigurationDecodesWithCostTrackingDisabled() throws {
+    func testOldProviderConfigurationDecodesWithCostTrackingEnabled() throws {
+        // Configs written before the cost-tracking field existed should opt in
+        // to cost tracking on load, so bundled prices surface out of the box.
         let data = Data(
             """
             {
@@ -678,9 +680,34 @@ final class TokenLogParserTests: XCTestCase {
             from: data
         )
 
-        XCTAssertFalse(decoded.costTrackingEnabled)
+        XCTAssertTrue(decoded.costTrackingEnabled)
         XCTAssertEqual(decoded.defaultModelName, "")
         XCTAssertTrue(decoded.customRates.isEmpty)
+    }
+
+    func testProviderConfigurationHonorsExplicitCostTrackingFlag() throws {
+        // An explicit stored value must be preserved, not overridden.
+        let data = Data(
+            """
+            {
+              "id": "openAI",
+              "isEnabled": true,
+              "tier": "Plus",
+              "tokenLimit": 0,
+              "windowHours": 24,
+              "nextResetAt": 0,
+              "customPath": "",
+              "costTrackingEnabled": false
+            }
+            """.utf8
+        )
+
+        let decoded = try JSONDecoder().decode(
+            ProviderConfiguration.self,
+            from: data
+        )
+
+        XCTAssertFalse(decoded.costTrackingEnabled)
     }
 
     func testGenericScannerParsesFinalLineWithoutTrailingNewline() throws {
@@ -1033,6 +1060,106 @@ final class TokenLogParserTests: XCTestCase {
             store.readings.first { $0.id == .claude }
         )
         XCTAssertNil(reading.planUsage)
+    }
+
+    func testBuiltInPricingMatchesExactAndPrefixModels() {
+        // Exact match.
+        let opus = BuiltInPricing.rate(for: .claude, modelName: "claude-opus-4-8")
+        XCTAssertEqual(opus?.inputPerMillion, 5)
+        XCTAssertEqual(opus?.outputPerMillion, 25)
+
+        // Prefix match: real logs append suffixes like "[1m]" or a snapshot date.
+        let suffixed = BuiltInPricing.rate(
+            for: .claude,
+            modelName: "claude-opus-4-8[1m]"
+        )
+        XCTAssertEqual(suffixed?.modelName, "claude-opus-4-8")
+
+        // Longest-prefix wins over a shorter sibling.
+        let codex = BuiltInPricing.rate(
+            for: .openAI,
+            modelName: "gpt-5.3-codex-preview"
+        )
+        XCTAssertEqual(codex?.modelName, "gpt-5.3-codex")
+
+        // Gemini logs can prefix the model with "models/".
+        let gemini = BuiltInPricing.rate(
+            for: .gemini,
+            modelName: "models/gemini-2.5-pro"
+        )
+        XCTAssertEqual(gemini?.modelName, "gemini-2.5-pro")
+    }
+
+    func testBuiltInPricingIsProviderScopedAndMissesUnknownModels() {
+        // A Claude model must not resolve under the Gemini provider.
+        XCTAssertNil(
+            BuiltInPricing.rate(for: .gemini, modelName: "claude-opus-4-8")
+        )
+        // No bundled row is a prefix of this older id.
+        XCTAssertNil(
+            BuiltInPricing.rate(for: .claude, modelName: "claude-3-opus")
+        )
+        // Subscription providers carry no per-token bundled price.
+        XCTAssertNil(
+            BuiltInPricing.rate(for: .cursor, modelName: "claude-opus-4-8")
+        )
+    }
+
+    func testScannerBucketsUsageIntoDayWeekMonthRollups() throws {
+        let now = Date(timeIntervalSince1970: 1_781_100_000)
+        let configuration = configuration(
+            id: .gemini,
+            now: now,
+            windowHours: 2
+        )
+        let file = try temporaryFile(
+            named: "gemini.jsonl",
+            lines: [
+                // 30 min ago: counts toward day/week/month AND the 2h quota.
+                try genericRecord(
+                    timestamp: now.addingTimeInterval(-1_800),
+                    tokens: 100,
+                    id: "recent"
+                ),
+                // 12h ago: day/week/month, but outside the quota window.
+                try genericRecord(
+                    timestamp: now.addingTimeInterval(-12 * 3_600),
+                    tokens: 200,
+                    id: "day"
+                ),
+                // 3 days ago: week/month only.
+                try genericRecord(
+                    timestamp: now.addingTimeInterval(-3 * 86_400),
+                    tokens: 400,
+                    id: "week"
+                ),
+                // 15 days ago: month only.
+                try genericRecord(
+                    timestamp: now.addingTimeInterval(-15 * 86_400),
+                    tokens: 800,
+                    id: "month"
+                ),
+                // 40 days ago: outside the 30-day read window entirely.
+                try genericRecord(
+                    timestamp: now.addingTimeInterval(-40 * 86_400),
+                    tokens: 1_600,
+                    id: "old"
+                )
+            ]
+        )
+
+        let result = LocalUsageScanner.scan(
+            configuration: configuration,
+            rootsOverride: [file],
+            now: now
+        )
+
+        let rollup = try XCTUnwrap(result.rollup)
+        XCTAssertEqual(rollup.day.totalTokens, 300)
+        XCTAssertEqual(rollup.week.totalTokens, 700)
+        XCTAssertEqual(rollup.month.totalTokens, 1_500)
+        // The headline quota figure stays scoped to the configured window.
+        XCTAssertEqual(result.tokens, 100)
     }
 
     private func configuration(
