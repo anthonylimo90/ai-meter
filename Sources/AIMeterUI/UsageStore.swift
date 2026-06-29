@@ -28,6 +28,8 @@ public final class UsageStore {
     private var configurationPersistenceTask: Task<Void, Never>?
     @ObservationIgnored
     private var hasStartedAutoRefresh = false
+    @ObservationIgnored
+    private var activityWatcher: ActivityWatcher?
 
     /// Update mechanism (Sparkle), injected by the app target at launch. Nil in
     /// previews and the snapshot tool.
@@ -37,6 +39,11 @@ public final class UsageStore {
     /// Whether the Claude status-line usage helper is installed.
     var claudeStatuslineEnabled = false
     var claudeStatuslineError: String?
+
+    /// Whether AI Meter's Claude Code activity hooks are installed. When on, a
+    /// directory watcher refreshes the moment a Claude turn ends.
+    var claudeHooksEnabled = false
+    var claudeHooksError: String?
 
     var readings: [ProviderUsage]
     var configurations: [ProviderConfiguration] {
@@ -141,6 +148,7 @@ public final class UsageStore {
         ) as? Date
         self.hasLoaded = !storedReadings.isEmpty
         self.claudeStatuslineEnabled = ClaudeStatuslineInstaller.isEnabled()
+        self.claudeHooksEnabled = ClaudeHooksInstaller.isEnabled()
     }
 
     public init(
@@ -221,6 +229,56 @@ public final class UsageStore {
         }
     }
 
+    /// Installs or removes AI Meter's Claude Code activity hooks and starts or
+    /// stops the directory watcher that turns those hooks into instant refreshes.
+    public func setClaudeHooksEnabled(_ enabled: Bool) {
+        claudeHooksError = nil
+        do {
+            if enabled {
+                try ClaudeHooksInstaller.enable()
+            } else {
+                try ClaudeHooksInstaller.disable()
+            }
+        } catch {
+            claudeHooksError = Self.describeHooksError(error)
+        }
+        claudeHooksEnabled = ClaudeHooksInstaller.isEnabled()
+        updateActivityWatcher()
+        Task { await refresh() }
+    }
+
+    private static func describeHooksError(_ error: Error) -> String {
+        switch error {
+        case ClaudeHooksInstaller.InstallError.settingsUnreadable:
+            return "Claude Code settings weren't found. Open Claude Code once, then try again."
+        case ClaudeHooksInstaller.InstallError.settingsNotJSON:
+            return "AI Meter couldn't read Claude Code's settings file."
+        case ClaudeHooksInstaller.InstallError.writeFailed:
+            return "AI Meter couldn't update Claude Code's settings."
+        default:
+            return error.localizedDescription
+        }
+    }
+
+    /// Starts the activity watcher when hooks are installed, tears it down when
+    /// not. A hook bump (`activity.touch`) triggers a coalesced refresh, which
+    /// already de-dupes against any in-flight scan and skips the wide rollup.
+    private func updateActivityWatcher() {
+        guard claudeHooksEnabled else {
+            activityWatcher?.stop()
+            activityWatcher = nil
+            return
+        }
+        guard activityWatcher == nil else { return }
+        let watcher = ActivityWatcher(
+            directory: ClaudeHooksInstaller.Paths.default.supportDir
+        ) { [weak self] in
+            Task { await self?.refresh(coalescing: true) }
+        }
+        watcher.start()
+        activityWatcher = watcher
+    }
+
     var statusSummary: String {
         statusSummary(at: .now)
     }
@@ -291,6 +349,7 @@ public final class UsageStore {
         guard !hasStartedAutoRefresh else { return }
         hasStartedAutoRefresh = true
         scheduleAutoRefresh(performInitialRefresh: autoRefreshEnabled)
+        updateActivityWatcher()
     }
 
     private func scheduleAutoRefresh(performInitialRefresh: Bool) {

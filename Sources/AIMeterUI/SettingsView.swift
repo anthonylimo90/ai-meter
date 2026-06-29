@@ -129,6 +129,32 @@ public struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     }
+
+                    Divider()
+
+                    Toggle(
+                        "Refresh instantly while Claude works",
+                        isOn: claudeHooksBinding
+                    )
+
+                    if let error = store.claudeHooksError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Label(
+                            store.claudeHooksEnabled
+                                ? "Enabled. AI Meter refreshes the moment a Claude Code turn ends."
+                                : "Adds local Claude Code hooks so AI Meter updates on activity instead of only on the timer. No network.",
+                            systemImage: store.claudeHooksEnabled
+                                ? "checkmark.circle.fill"
+                                : "bolt.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .padding(4)
             }
@@ -162,6 +188,13 @@ public struct SettingsView: View {
         Binding(
             get: { store.claudeStatuslineEnabled },
             set: { store.setClaudeStatuslineEnabled($0) }
+        )
+    }
+
+    private var claudeHooksBinding: Binding<Bool> {
+        Binding(
+            get: { store.claudeHooksEnabled },
+            set: { store.setClaudeHooksEnabled($0) }
         )
     }
 
