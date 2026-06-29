@@ -45,6 +45,12 @@ public final class UsageStore {
     var claudeHooksEnabled = false
     var claudeHooksError: String?
 
+    /// Live Claude Code session activity (from the hooks) and the mascot state
+    /// derived from it, the refresh state, and low quotas.
+    @ObservationIgnored
+    private var sessionActivities: [SessionActivity] = []
+    var mascotStatus: MascotStatus = .idle
+
     var readings: [ProviderUsage]
     var configurations: [ProviderConfiguration] {
         didSet {
@@ -271,12 +277,59 @@ public final class UsageStore {
         }
         guard activityWatcher == nil else { return }
         let watcher = ActivityWatcher(
-            directory: ClaudeHooksInstaller.Paths.default.supportDir
+            directory: ClaudeHooksInstaller.Paths.default.supportDir,
+            debounce: .milliseconds(500)
         ) { [weak self] in
-            Task { await self?.refresh(coalescing: true) }
+            self?.handleActivitySignal()
         }
         watcher.start()
         activityWatcher = watcher
+        refreshActivityState()
+    }
+
+    /// A hook fired: update the buddy immediately (cheap session read), then
+    /// kick a coalesced full refresh for the numbers.
+    private func handleActivitySignal() {
+        refreshActivityState()
+        Task { await refresh(coalescing: true) }
+    }
+
+    /// Re-read the session files and recompute the mascot state.
+    func refreshActivityState(now: Date = .now) {
+        sessionActivities = SessionActivityStore.read(now: now)
+        recomputeMascotStatus(now: now)
+    }
+
+    private func recomputeMascotStatus(now: Date = .now) {
+        let activity = SessionActivityStore.aggregate(sessionActivities, now: now)
+        let next: MascotStatus
+        switch activity {
+        case .awaiting:
+            next = MascotStatus(face: .awaiting, tint: .claude)
+        case .active:
+            next = MascotStatus(face: .active, tint: .claude)
+        case .idle:
+            if isRefreshing {
+                next = MascotStatus(face: .refreshing)
+            } else if let low = lowestLowProvider(at: now) {
+                next = MascotStatus(face: .low, tint: low)
+            } else {
+                next = .idle
+            }
+        }
+        if next != mascotStatus {
+            mascotStatus = next
+        }
+    }
+
+    private func lowestLowProvider(at now: Date) -> ProviderID? {
+        readings
+            .filter { $0.isLow(at: now) }
+            .min(by: {
+                ($0.remainingPercent(at: now) ?? 100)
+                    < ($1.remainingPercent(at: now) ?? 100)
+            })?
+            .id
     }
 
     var statusSummary: String {
@@ -413,6 +466,7 @@ public final class UsageStore {
         isRefreshing = true
         refreshingProviders = Set(activeConfigurations.map(\.id))
         errorMessage = nil
+        recomputeMascotStatus()
         var hadWarnings = false
 
         // Recompute the wide day/week/month rollup only on the slow cadence (or
@@ -451,6 +505,7 @@ public final class UsageStore {
         }
         hasLoaded = true
         persistReadings()
+        refreshActivityState()
     }
 
     func merge(_ result: ScanResult) {

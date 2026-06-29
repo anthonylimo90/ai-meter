@@ -70,7 +70,10 @@ private struct PopoverHeader: View {
     }
 
     private func content(now: Date) -> some View {
-        HStack(alignment: .top, spacing: 16) {
+        HStack(alignment: .top, spacing: 14) {
+            MascotView(status: store.mascotStatus, size: 44)
+                .help(mascotHelp)
+
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Meter")
                     .font(.system(size: 27, weight: .bold))
@@ -120,6 +123,16 @@ private struct PopoverHeader: View {
         }
         .padding(.horizontal, MeterTheme.contentPadding)
         .padding(.top, 20)
+    }
+
+    private var mascotHelp: String {
+        switch store.mascotStatus.face {
+        case .active: return "An AI session is working"
+        case .awaiting: return "A session is waiting for you"
+        case .refreshing: return "Refreshing usage"
+        case .low: return "A quota is running low"
+        case .idle: return "Idle"
+        }
     }
 
     private func statusColor(at date: Date) -> Color {
