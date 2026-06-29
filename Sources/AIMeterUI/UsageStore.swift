@@ -49,6 +49,12 @@ public final class UsageStore {
     /// derived from it, the refresh state, and low quotas.
     @ObservationIgnored
     private var sessionActivities: [SessionActivity] = []
+    @ObservationIgnored
+    private var providerActivityMonitor: ProviderActivityMonitor?
+    @ObservationIgnored
+    private var providerLastActive: [ProviderID: Date] = [:]
+    @ObservationIgnored
+    private var mascotDecayTask: Task<Void, Never>?
     var mascotStatus: MascotStatus = .idle
 
     var readings: [ProviderUsage]
@@ -56,6 +62,7 @@ public final class UsageStore {
         didSet {
             reconcileReadingsWithConfigurations()
             scheduleConfigurationPersistence()
+            updateProviderMonitor()
         }
     }
     var isRefreshing = false
@@ -76,6 +83,7 @@ public final class UsageStore {
             rescheduleAutoRefresh(
                 performInitialRefresh: autoRefreshEnabled && !oldValue
             )
+            updateProviderMonitor()
         }
     }
     var refreshIntervalSeconds: Int {
@@ -301,15 +309,23 @@ public final class UsageStore {
     }
 
     private func recomputeMascotStatus(now: Date = .now) {
-        let activity = SessionActivityStore.aggregate(sessionActivities, now: now)
+        let claudeKind = SessionActivityStore.aggregate(sessionActivities, now: now)
         let next: MascotStatus
-        switch activity {
-        case .awaiting:
+        if claudeKind == .awaiting {
             next = MascotStatus(face: .awaiting, tint: .claude)
-        case .active:
-            next = MascotStatus(face: .active, tint: .claude)
-        case .idle:
-            if isRefreshing {
+        } else {
+            // Fold Claude's precise hook activity into the file-derived map so
+            // the tint is whichever provider is working most recently.
+            var activity = providerLastActive
+            if claudeKind == .active {
+                activity[.claude] = sessionActivities
+                    .filter { $0.kind == .active }
+                    .map(\.timestamp)
+                    .max() ?? now
+            }
+            if let active = ProviderActivityResolver.mostRecentlyActive(activity, now: now) {
+                next = MascotStatus(face: .active, tint: active)
+            } else if isRefreshing {
                 next = MascotStatus(face: .refreshing)
             } else if let low = lowestLowProvider(at: now) {
                 next = MascotStatus(face: .low, tint: low)
@@ -320,6 +336,97 @@ public final class UsageStore {
         if next != mascotStatus {
             mascotStatus = next
         }
+        ensureMascotDecay()
+    }
+
+    /// While the buddy is active, re-evaluate every few seconds so it decays
+    /// back to idle once activity stops (no further filesystem event arrives).
+    private func ensureMascotDecay() {
+        guard mascotStatus.face == .active else {
+            mascotDecayTask?.cancel()
+            mascotDecayTask = nil
+            return
+        }
+        guard mascotDecayTask == nil else { return }
+        mascotDecayTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3))
+                guard let self, !Task.isCancelled else { return }
+                self.recomputeMascotStatus()
+            }
+        }
+    }
+
+    /// Starts/stops the FSEvents monitor over the enabled providers' record
+    /// folders. Runs whenever automatic refresh is on, so the buddy reacts to
+    /// any AI tool — not just Claude — and changes also drive a coalesced
+    /// refresh (event-driven updates for every provider).
+    private func updateProviderMonitor() {
+        guard hasStartedAutoRefresh, autoRefreshEnabled else {
+            providerActivityMonitor?.stop()
+            providerActivityMonitor = nil
+            return
+        }
+        // Rebuild so newly enabled/disabled providers are reflected.
+        providerActivityMonitor?.stop()
+        let paths = providerWatchPaths()
+        guard !paths.isEmpty else {
+            providerActivityMonitor = nil
+            return
+        }
+        let monitor = ProviderActivityMonitor(paths: paths) { [weak self] changed in
+            self?.handleProviderActivity(changed)
+        }
+        monitor.start()
+        providerActivityMonitor = monitor
+    }
+
+    private func providerWatchPaths() -> [String] {
+        var paths = Set<String>()
+        let fileManager = FileManager.default
+        for configuration in configurations where configuration.isEnabled {
+            for url in ProviderActivityResolver.roots(
+                for: configuration.id,
+                customPath: configuration.customPath
+            ) {
+                var isDirectory: ObjCBool = false
+                guard fileManager.fileExists(
+                    atPath: url.path,
+                    isDirectory: &isDirectory
+                ) else { continue }
+                paths.insert(
+                    isDirectory.boolValue
+                        ? url.path
+                        : url.deletingLastPathComponent().path
+                )
+            }
+        }
+        return Array(paths)
+    }
+
+    private func handleProviderActivity(_ changedPaths: [String]) {
+        let roots = Dictionary(
+            uniqueKeysWithValues: configurations.filter(\.isEnabled).map {
+                ($0.id, ProviderActivityResolver.roots(
+                    for: $0.id,
+                    customPath: $0.customPath
+                ))
+            }
+        )
+        let now = Date()
+        var touched = false
+        for path in changedPaths {
+            if let provider = ProviderActivityResolver.provider(
+                forChangedPath: path,
+                roots: roots
+            ) {
+                providerLastActive[provider] = now
+                touched = true
+            }
+        }
+        guard touched else { return }
+        recomputeMascotStatus(now: now)
+        Task { await refresh(coalescing: true) }
     }
 
     private func lowestLowProvider(at now: Date) -> ProviderID? {
@@ -403,6 +510,7 @@ public final class UsageStore {
         hasStartedAutoRefresh = true
         scheduleAutoRefresh(performInitialRefresh: autoRefreshEnabled)
         updateActivityWatcher()
+        updateProviderMonitor()
     }
 
     private func scheduleAutoRefresh(performInitialRefresh: Bool) {
