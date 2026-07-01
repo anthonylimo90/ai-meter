@@ -179,4 +179,23 @@ enum SnapshotFixtures {
             lastUpdated: now
         )
     }
+
+    /// Two concurrent Claude sessions in different states/projects, for
+    /// previewing the popover's "Active sessions" section.
+    static func sessionActivities(now: Date) -> [SessionActivity] {
+        [
+            SessionActivity(
+                id: "fixture-a",
+                project: "ai-meter",
+                kind: .awaiting,
+                timestamp: now.addingTimeInterval(-120)
+            ),
+            SessionActivity(
+                id: "fixture-b",
+                project: "curate-ica",
+                kind: .active,
+                timestamp: now.addingTimeInterval(-45)
+            )
+        ]
+    }
 }

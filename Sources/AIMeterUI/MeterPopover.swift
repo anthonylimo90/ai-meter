@@ -22,6 +22,12 @@ public struct MeterPopover: View {
                     .padding(.top, 12)
             }
 
+            if !store.displaySessions.isEmpty {
+                ActiveSessionsSection(store: store)
+                    .padding(.horizontal, MeterTheme.contentPadding)
+                    .padding(.top, 16)
+            }
+
             ProviderUsageList(store: store, referenceDate: referenceDate)
                 .padding(.horizontal, MeterTheme.contentPadding)
                 .padding(.top, 16)
@@ -161,6 +167,117 @@ private struct PopoverHeader: View {
         let minutes = seconds / 60
         if minutes < 60 { return "Updated \(minutes)m ago" }
         return "Updated \(minutes / 60)h ago"
+    }
+}
+
+private struct ActiveSessionsSection: View {
+    let store: UsageStore
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            content(now: context.date)
+        }
+    }
+
+    private func content(now: Date) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("ACTIVE SESSIONS")
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.6)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                if let costText {
+                    Text(costText)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .help(
+                            "Current Claude window spend, shared across all "
+                                + "sessions below — not split per session."
+                        )
+                }
+            }
+
+            VStack(spacing: 0) {
+                ForEach(
+                    Array(store.displaySessions.enumerated()),
+                    id: \.element.id
+                ) { index, session in
+                    sessionRow(session, now: now)
+                    if index < store.displaySessions.count - 1 {
+                        Divider().overlay(.white.opacity(0.045))
+                    }
+                }
+            }
+            .background {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(.white.opacity(0.035))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(.white.opacity(0.10), lineWidth: 1)
+                    }
+            }
+        }
+    }
+
+    private var costText: String? {
+        guard
+            let claude = store.readings.first(where: { $0.id == .claude }),
+            let estimate = claude.costEstimate,
+            estimate.missingPricingReason == nil
+        else { return nil }
+        return estimate.estimatedAmount.currencyString(code: estimate.currencyCode)
+    }
+
+    private func sessionRow(_ session: SessionActivity, now: Date) -> some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(dotColor(session.kind))
+                .frame(width: 8, height: 8)
+
+            Text(session.project.isEmpty ? "Unnamed project" : session.project)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+
+            Spacer()
+
+            Text(stateLabel(session.kind))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(dotColor(session.kind))
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 34)
+        .help(accessibilitySummary(session, now: now))
+    }
+
+    private func dotColor(_ kind: ActivityKind) -> Color {
+        switch kind {
+        case .awaiting: return .yellow
+        case .active: return .green
+        case .idle: return .secondary
+        }
+    }
+
+    private func stateLabel(_ kind: ActivityKind) -> String {
+        switch kind {
+        case .awaiting: return "Waiting for you"
+        case .active: return "Working"
+        case .idle: return "Idle"
+        }
+    }
+
+    private func accessibilitySummary(
+        _ session: SessionActivity,
+        now: Date
+    ) -> String {
+        let project = session.project.isEmpty ? "Unnamed project" : session.project
+        let elapsed = now.timeIntervalSince(session.timestamp)
+        guard elapsed > 0 else {
+            return "\(project) · \(stateLabel(session.kind))"
+        }
+        return "\(project) · \(stateLabel(session.kind)) · "
+            + "updated \(elapsed.compactDuration) ago"
     }
 }
 

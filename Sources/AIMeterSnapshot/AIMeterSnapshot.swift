@@ -34,6 +34,11 @@ struct AIMeterSnapshot {
         if renderLive, !renderSettings {
             await store.refresh()
         }
+        if arguments.contains("--sessions") {
+            store.sessionActivities = SnapshotFixtures.sessionActivities(
+                now: referenceDate ?? .now
+            )
+        }
 
         _ = NSApplication.shared
         let hostingView = NSHostingView(

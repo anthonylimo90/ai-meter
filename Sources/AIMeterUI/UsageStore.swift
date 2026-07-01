@@ -48,10 +48,10 @@ public final class UsageStore {
     var claudeHooksEnabled = false
     var claudeHooksError: String?
 
-    /// Live Claude Code session activity (from the hooks) and the mascot state
-    /// derived from it, the refresh state, and low quotas.
-    @ObservationIgnored
-    private var sessionActivities: [SessionActivity] = []
+    /// Live Claude Code sessions from the activity hooks (empty when hooks
+    /// aren't installed or no session is currently tracked). Feeds both the
+    /// popover's "Active sessions" list and the mascot state below.
+    public var sessionActivities: [SessionActivity] = []
     @ObservationIgnored
     private var providerActivityMonitor: ProviderActivityMonitor?
     @ObservationIgnored
@@ -218,6 +218,7 @@ public final class UsageStore {
 
     public var menuBarTitle: String {
         guard hasLoaded else { return "AI Meter" }
+        if mascotStatus.face == .awaiting { return "Waiting for you" }
         let lowCount = readings.filter(\.isLow).count
         return lowCount > 0 ? "\(lowCount) low" : "AI Meter"
     }
@@ -246,6 +247,24 @@ public final class UsageStore {
             menuBarProviders.append(id)
         } else {
             menuBarProviders.removeAll { $0 == id }
+        }
+    }
+
+    /// Live sessions for display, most urgent first: awaiting your input, then
+    /// actively working, then idle (opened but not yet ended) — the session an
+    /// awaiting sort ahead of one that's merely thinking, same priority the
+    /// mascot uses.
+    public var displaySessions: [SessionActivity] {
+        func rank(_ kind: ActivityKind) -> Int {
+            switch kind {
+            case .awaiting: return 0
+            case .active: return 1
+            case .idle: return 2
+            }
+        }
+        return sessionActivities.sorted {
+            if $0.kind != $1.kind { return rank($0.kind) < rank($1.kind) }
+            return $0.timestamp > $1.timestamp
         }
     }
 

@@ -9,12 +9,23 @@ public struct AIMeterMenuBarLabel: View {
         self.store = store
     }
 
+    /// A session waiting on you is the most urgent thing AI Meter can show, so
+    /// it surfaces even when the mascot itself is off — mirroring the "never
+    /// hidden behind a thinking session" rule this app's mascot is modeled on.
+    private var isAwaitingInput: Bool {
+        store.mascotStatus.face == .awaiting
+    }
+
     public var body: some View {
         Group {
             if store.showMenuBarMeters, !store.menuBarReadings.isEmpty {
                 HStack(spacing: 8) {
                     if store.showMenuBarMascot {
                         MascotView(status: store.mascotStatus, size: 16)
+                    } else if isAwaitingInput {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .foregroundStyle(.yellow)
+                            .help("A Claude Code session is waiting for you")
                     }
                     ForEach(store.menuBarReadings, id: \.id) { reading in
                         ProviderMenuBarMeter(reading: reading)
