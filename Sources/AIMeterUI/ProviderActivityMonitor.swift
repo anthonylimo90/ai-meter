@@ -20,11 +20,20 @@ final class ProviderActivityMonitor {
     func start() {
         guard stream == nil, !paths.isEmpty else { return }
 
+        // The context retains this object for as long as the underlying
+        // FSEventStreamRef exists (released via `release` below, which fires
+        // from FSEventStreamRelease). Without this, the only thing keeping
+        // the Swift wrapper alive is the caller's stored property; if that
+        // gets reassigned while a callback is already queued on the dispatch
+        // queue, the callback fires against freed memory (EXC_BAD_ACCESS).
         var context = FSEventStreamContext(
             version: 0,
-            info: Unmanaged.passUnretained(self).toOpaque(),
+            info: Unmanaged.passRetained(self).toOpaque(),
             retain: nil,
-            release: nil,
+            release: { info in
+                guard let info else { return }
+                Unmanaged<ProviderActivityMonitor>.fromOpaque(info).release()
+            },
             copyDescription: nil
         )
         let flags = UInt32(
@@ -33,12 +42,20 @@ final class ProviderActivityMonitor {
                 | kFSEventStreamCreateFlagIgnoreSelf
         )
         let callback: FSEventStreamCallback = {
-            _, info, count, eventPaths, _, _ in
+            _, info, numEvents, eventPaths, _, _ in
             guard let info else { return }
+            // Borrow only — the context above owns the retain/release.
             let monitor = Unmanaged<ProviderActivityMonitor>
                 .fromOpaque(info).takeUnretainedValue()
-            let changed = (unsafeBitCast(eventPaths, to: NSArray.self)
-                as? [String]) ?? []
+            // Without kFSEventStreamCreateFlagUseCFTypes, eventPaths is a raw
+            // `const char *[]`, not a CFArray/NSArray — bitcasting it to
+            // NSArray (as an earlier version of this code did) sends real
+            // Objective-C messages to what is actually a C string array and
+            // crashes. Read it as the C array it is.
+            let cPaths = eventPaths.assumingMemoryBound(
+                to: UnsafePointer<CChar>.self
+            )
+            let changed = (0..<numEvents).map { String(cString: cPaths[$0]) }
             guard !changed.isEmpty else { return }
             // The stream is scheduled on the main queue, so we are on the main
             // actor here.
@@ -54,6 +71,9 @@ final class ProviderActivityMonitor {
             0.4,
             flags
         ) else {
+            // No stream was created, so it will never invoke `release` to
+            // balance the retain above — release it ourselves.
+            Unmanaged<ProviderActivityMonitor>.fromOpaque(context.info!).release()
             return
         }
         self.stream = stream

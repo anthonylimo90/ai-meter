@@ -55,6 +55,8 @@ public final class UsageStore {
     @ObservationIgnored
     private var providerActivityMonitor: ProviderActivityMonitor?
     @ObservationIgnored
+    private var providerMonitorPaths: Set<String> = []
+    @ObservationIgnored
     private var providerLastActive: [ProviderID: Date] = [:]
     @ObservationIgnored
     private var mascotDecayTask: Task<Void, Never>?
@@ -410,24 +412,36 @@ public final class UsageStore {
     /// folders. Runs whenever automatic refresh is on, so the buddy reacts to
     /// any AI tool — not just Claude — and changes also drive a coalesced
     /// refresh (event-driven updates for every provider).
+    ///
+    /// `configurations` changes on essentially every refresh cycle (e.g.
+    /// reset-date normalization), so this is called far more often than the
+    /// watched path set actually changes. Skip the teardown/rebuild when the
+    /// set is unchanged — recreating a native FSEvents stream is wasteful and
+    /// churning it repeatedly is exactly the kind of stop/replace race that
+    /// makes a stream-lifetime bug likely to surface.
     private func updateProviderMonitor() {
         guard hasStartedAutoRefresh, autoRefreshEnabled else {
             providerActivityMonitor?.stop()
             providerActivityMonitor = nil
+            providerMonitorPaths = []
             return
         }
-        // Rebuild so newly enabled/disabled providers are reflected.
-        providerActivityMonitor?.stop()
-        let paths = providerWatchPaths()
+        let paths = Set(providerWatchPaths())
         guard !paths.isEmpty else {
+            providerActivityMonitor?.stop()
             providerActivityMonitor = nil
+            providerMonitorPaths = []
             return
         }
-        let monitor = ProviderActivityMonitor(paths: paths) { [weak self] changed in
+        guard paths != providerMonitorPaths else { return }
+
+        providerActivityMonitor?.stop()
+        let monitor = ProviderActivityMonitor(paths: Array(paths)) { [weak self] changed in
             self?.handleProviderActivity(changed)
         }
         monitor.start()
         providerActivityMonitor = monitor
+        providerMonitorPaths = paths
     }
 
     private func providerWatchPaths() -> [String] {
