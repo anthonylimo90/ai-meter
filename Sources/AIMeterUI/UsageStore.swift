@@ -9,6 +9,9 @@ public final class UsageStore {
     private static let autoRefreshKey = "auto-refresh-enabled"
     private static let refreshIntervalKey = "refresh-interval-seconds"
     private static let showMenuBarMetersKey = "show-menu-bar-meters"
+    private static let menuBarProvidersKey = "menu-bar-providers-v1"
+    private static let showMenuBarMascotKey = "show-menu-bar-mascot"
+    public static let maxMenuBarProviders = 3
     private static let readingsKey = "last-provider-readings-v3"
     private static let lastUpdatedKey = "last-provider-update"
     private static let lastRollupKey = "last-cost-rollup-update"
@@ -103,6 +106,25 @@ public final class UsageStore {
             )
         }
     }
+    /// Providers pinned to the menu bar, in display order. Always shown (even
+    /// when a plan % isn't available) so the menu bar never "switches" to
+    /// whichever provider happens to be reporting.
+    public var menuBarProviders: [ProviderID] {
+        didSet {
+            UserDefaults.standard.set(
+                menuBarProviders.map(\.rawValue),
+                forKey: Self.menuBarProvidersKey
+            )
+        }
+    }
+    public var showMenuBarMascot: Bool {
+        didSet {
+            UserDefaults.standard.set(
+                showMenuBarMascot,
+                forKey: Self.showMenuBarMascotKey
+            )
+        }
+    }
 
     public init() {
         let configurations = Self.loadConfigurations()
@@ -119,6 +141,16 @@ public final class UsageStore {
         self.showMenuBarMeters = UserDefaults.standard.object(
             forKey: Self.showMenuBarMetersKey
         ) as? Bool ?? true
+        if let raw = UserDefaults.standard.stringArray(
+            forKey: Self.menuBarProvidersKey
+        ) {
+            self.menuBarProviders = raw.compactMap(ProviderID.init(rawValue:))
+        } else {
+            self.menuBarProviders = [.openAI, .claude]
+        }
+        self.showMenuBarMascot = UserDefaults.standard.object(
+            forKey: Self.showMenuBarMascotKey
+        ) as? Bool ?? false
         let storedReadings = Self.loadReadings()
         let now = Date()
         self.readings = configurations.filter(\.isEnabled).map { configuration in
@@ -175,6 +207,8 @@ public final class UsageStore {
         autoRefreshEnabled = true
         refreshIntervalSeconds = UsageRefreshPolicy.defaultInterval
         showMenuBarMeters = true
+        menuBarProviders = [.openAI, .claude]
+        showMenuBarMascot = false
         readings = previewReadings
         self.lastUpdated = lastUpdated
         hasLoaded = true
@@ -186,16 +220,31 @@ public final class UsageStore {
         return lowCount > 0 ? "\(lowCount) low" : "AI Meter"
     }
 
-    public var openAIMenuBarReading: ProviderUsage? {
-        liveMenuBarReading(for: .openAI)
+    /// The pinned providers' readings, in pin order. Only those currently
+    /// enabled (present in `readings`) appear; each is shown regardless of
+    /// whether a live plan % is available.
+    public var menuBarReadings: [ProviderUsage] {
+        menuBarProviders.compactMap { id in
+            readings.first { $0.id == id }
+        }
     }
 
-    public var claudeMenuBarReading: ProviderUsage? {
-        liveMenuBarReading(for: .claude)
+    public var isMenuBarPinFull: Bool {
+        menuBarProviders.count >= Self.maxMenuBarProviders
     }
 
-    public var hasLiveMenuBarReadings: Bool {
-        openAIMenuBarReading != nil || claudeMenuBarReading != nil
+    public func isPinnedToMenuBar(_ id: ProviderID) -> Bool {
+        menuBarProviders.contains(id)
+    }
+
+    /// Toggle a provider's menu-bar pin, preserving order and the pin cap.
+    public func setMenuBarPinned(_ id: ProviderID, _ pinned: Bool) {
+        if pinned {
+            guard !menuBarProviders.contains(id), !isMenuBarPinFull else { return }
+            menuBarProviders.append(id)
+        } else {
+            menuBarProviders.removeAll { $0 == id }
+        }
     }
 
     public var canCheckForUpdates: Bool {
@@ -546,16 +595,6 @@ public final class UsageStore {
         scheduleAutoRefresh(
             performInitialRefresh: performInitialRefresh
         )
-    }
-
-    private func liveMenuBarReading(
-        for provider: ProviderID
-    ) -> ProviderUsage? {
-        readings.first {
-            $0.id == provider
-                && $0.planUsageSource == .providerReported
-                && $0.planUsage?.active() != nil
-        }
     }
 
     func resetConfiguration() {

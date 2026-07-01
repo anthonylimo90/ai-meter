@@ -72,6 +72,35 @@ public struct SettingsView: View {
                         isOn: $store.showMenuBarMeters
                     )
 
+                    if store.showMenuBarMeters {
+                        Toggle(
+                            "Show the activity mascot in the menu bar",
+                            isOn: $store.showMenuBarMascot
+                        )
+
+                        LabeledContent("Pinned providers") {
+                            HStack(spacing: 12) {
+                                ForEach(
+                                    store.configurations.filter(\.isEnabled),
+                                    id: \.id
+                                ) { configuration in
+                                    Toggle(
+                                        configuration.id.shortName,
+                                        isOn: pinBinding(configuration.id)
+                                    )
+                                    .toggleStyle(.checkbox)
+                                    .disabled(
+                                        !store.isPinnedToMenuBar(configuration.id)
+                                            && store.isMenuBarPinFull
+                                    )
+                                }
+                            }
+                        }
+                        .help(
+                            "Always show up to \(UsageStore.maxMenuBarProviders) providers in the menu bar."
+                        )
+                    }
+
                     LabeledContent("Refresh every") {
                         Picker(
                             "Refresh every",
@@ -195,6 +224,13 @@ public struct SettingsView: View {
         Binding(
             get: { store.claudeHooksEnabled },
             set: { store.setClaudeHooksEnabled($0) }
+        )
+    }
+
+    private func pinBinding(_ id: ProviderID) -> Binding<Bool> {
+        Binding(
+            get: { store.isPinnedToMenuBar(id) },
+            set: { store.setMenuBarPinned(id, $0) }
         )
     }
 

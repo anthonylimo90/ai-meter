@@ -11,14 +11,19 @@ public struct AIMeterMenuBarLabel: View {
 
     public var body: some View {
         Group {
-            if store.showMenuBarMeters, store.hasLiveMenuBarReadings {
+            if store.showMenuBarMeters, !store.menuBarReadings.isEmpty {
                 HStack(spacing: 8) {
-                    if let reading = store.openAIMenuBarReading {
+                    if store.showMenuBarMascot {
+                        MascotView(status: store.mascotStatus, size: 16)
+                    }
+                    ForEach(store.menuBarReadings, id: \.id) { reading in
                         ProviderMenuBarMeter(reading: reading)
                     }
-                    if let reading = store.claudeMenuBarReading {
-                        ProviderMenuBarMeter(reading: reading)
-                    }
+                }
+            } else if store.showMenuBarMascot {
+                HStack(spacing: 6) {
+                    MascotView(status: store.mascotStatus, size: 16)
+                    Text(store.menuBarTitle)
                 }
             } else {
                 Label(
